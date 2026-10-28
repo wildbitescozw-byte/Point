@@ -2,6 +2,8 @@ package com.glass.launcher
 
 import android.Manifest
 import android.animation.ValueAnimator
+import android.graphics.PathMeasure
+import android.view.animation.DecelerateInterpolator
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.DatePickerDialog
@@ -139,6 +141,10 @@ class WallView(c: Context) : View(c) {
 }
 
 // A frosted-glass panel: draws a blurred slice of the wallpaper behind itself.
+object Motion {
+    var reduced = false
+}
+
 class GlassBox(c: Context) : LinearLayout(c) {
     private val path = Path()
     private val rect = RectF()
@@ -149,15 +155,49 @@ class GlassBox(c: Context) : LinearLayout(c) {
     private val loc = IntArray(2)
     private val dens = c.resources.displayMetrics.density
     private val radius = 24f * dens
+    private var fa = 0f
+    private var fAnim: ValueAnimator? = null
+    private val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var sheenShader: LinearGradient? = null
 
     init {
         setWillNotDraw(false)
         line.style = Paint.Style.STROKE
     }
 
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        super.onSizeChanged(w, h, ow, oh)
+        if (h > 0) sheenShader = LinearGradient(0f, 0f, 0f, h * 0.6f, 0x403DDC97, 0x003DDC97, Shader.TileMode.CLAMP)
+    }
+
     override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
         super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
-        invalidate()
+        fAnim?.cancel()
+        val to = if (gainFocus) 1f else 0f
+        if (Motion.reduced) {
+            fa = to
+            invalidate()
+            return
+        }
+        val a = ValueAnimator.ofFloat(fa, to)
+        a.duration = 180
+        a.addUpdateListener {
+            fa = it.animatedValue as Float
+            invalidate()
+        }
+        a.start()
+        fAnim = a
+    }
+
+    override fun performClick(): Boolean {
+        if (!Motion.reduced) {
+            val base = if (isFocused) 1.07f else 1f
+            animate().cancel()
+            animate().scaleX(base * 0.94f).scaleY(base * 0.94f).setDuration(70).withEndAction {
+                animate().scaleX(base).scaleY(base).setDuration(130).setInterpolator(DecelerateInterpolator()).start()
+            }.start()
+        }
+        return super.performClick()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -165,12 +205,26 @@ class GlassBox(c: Context) : LinearLayout(c) {
         path.reset()
         path.addRoundRect(rect, radius, radius, Path.Direction.CW)
         drawBackdrop(canvas, this, path, bp, dst, loc)
-        val f = isFocused
-        fill.color = if (f) 0x45FFFFFF else 0x22FFFFFF
+        val f = fa
+        fill.color = (((0x22 + (0x45 - 0x22) * f).toInt()) shl 24) or 0xFFFFFF
         canvas.drawRoundRect(rect, radius, radius, fill)
-        val sw = if (f) 3f * dens else 1.2f * dens
+        val sh = sheenShader
+        if (f > 0.01f && sh != null) {
+            canvas.save()
+            canvas.clipPath(path)
+            sheenPaint.shader = sh
+            sheenPaint.alpha = (255 * f).toInt()
+            canvas.drawRect(0f, 0f, width.toFloat(), height * 0.6f, sheenPaint)
+            sheenPaint.shader = null
+            canvas.restore()
+        }
+        val sw = (1.2f + 1.8f * f) * dens
         line.strokeWidth = sw
-        line.color = if (f) 0xF0B8FFE3.toInt() else 0x44FFFFFF
+        val la = (0x44 + (0xF0 - 0x44) * f).toInt()
+        val lr = (0xFF + (0xB8 - 0xFF) * f).toInt()
+        val lg = 0xFF
+        val lb = (0xFF + (0xE3 - 0xFF) * f).toInt()
+        line.color = (la shl 24) or (lr shl 16) or (lg shl 8) or lb
         rect.inset(sw / 2f, sw / 2f)
         canvas.drawRoundRect(rect, radius, radius, line)
         super.onDraw(canvas)
@@ -780,6 +834,11 @@ class AppCarousel(c: Context) : View(c) {
     private val loc = IntArray(2)
     private var glow: RadialGradient? = null
     private var sheen: LinearGradient? = null
+    private var floorGlow: RadialGradient? = null
+    private val ringPath = Path()
+    private val ringRect = RectF()
+    private val pm = PathMeasure()
+    private val seg = Path()
 
     init {
         isFocusable = true
@@ -879,6 +938,12 @@ class AppCarousel(c: Context) : View(c) {
         glow = RadialGradient(0f, 0f, f, 0x703DDC97, 0x003DDC97, Shader.TileMode.CLAMP)
         sheen = LinearGradient(0f, -f / 2f, 0f, f / 2f, 0x44FFFFFF, 0x06FFFFFF, Shader.TileMode.CLAMP)
         tp.textSize = h * 0.115f
+        val rr = f * 0.26f
+        ringRect.set(-f / 2f, -f / 2f, f / 2f, f / 2f)
+        ringPath.reset()
+        ringPath.addRoundRect(ringRect, rr, rr, Path.Direction.CW)
+        pm.setPath(ringPath, false)
+        floorGlow = RadialGradient(0f, 0f, f * 0.7f, 0x553DDC97, 0x003DDC97, Shader.TileMode.CLAMP)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -910,6 +975,21 @@ class AppCarousel(c: Context) : View(c) {
             canvas.restore()
         }
 
+        // soft emerald light pooling beneath the selection, as if it floats above the wallpaper
+        val fg = floorGlow
+        if (fg != null) {
+            canvas.save()
+            canvas.translate(cx, cy + f * 0.58f)
+            canvas.scale(1f, 0.16f)
+            p.style = Paint.Style.FILL
+            p.shader = fg
+            p.alpha = (255 * (0.55f + 0.45f * pulse)).toInt()
+            canvas.drawCircle(0f, 0f, f * 0.7f, p)
+            p.shader = null
+            p.alpha = 255
+            canvas.restore()
+        }
+
         // icons glide past the frame; the nearest one is largest and brightest
         val gap1 = f * 1.08f
         val gap2 = f * 0.60f
@@ -927,12 +1007,14 @@ class AppCarousel(c: Context) : View(c) {
             val x = cx + (if (d < 0f) -off else off)
             val size = base * s
             val tl = size * 1.22f
-            tile.set(x - tl / 2f, cy - tl / 2f, x + tl / 2f, cy + tl / 2f)
+            val lift = if (Motion.reduced) 0f else f * 0.025f * (1f - Math.min(1f, ad))
+            val cyi = cy - lift
+            tile.set(x - tl / 2f, cyi - tl / 2f, x + tl / 2f, cyi + tl / 2f)
             p.color = ((0x2A * a).toInt() shl 24) or 0xFFFFFF
             canvas.drawRoundRect(tile, tl * 0.26f, tl * 0.26f, p)
             val dr = apps[i].icon
             val half = size / 2f
-            dr.setBounds((x - half).toInt(), (cy - half).toInt(), (x + half).toInt(), (cy + half).toInt())
+            dr.setBounds((x - half).toInt(), (cyi - half).toInt(), (x + half).toInt(), (cyi + half).toInt())
             dr.setAlpha((255 * a).toInt())
             dr.draw(canvas)
         }
@@ -952,8 +1034,21 @@ class AppCarousel(c: Context) : View(c) {
         }
         p.style = Paint.Style.STROKE
         p.strokeWidth = (if (isFocused) 3f else 2f) * dens
-        p.color = if (isFocused) 0xFFB8FFE3.toInt() else 0x99B8FFE3.toInt()
+        p.color = if (isFocused) (if (settled) 0xFFB8FFE3.toInt() else 0xFFE6FFF4.toInt()) else 0x99B8FFE3.toInt()
         canvas.drawRoundRect(rect, rad, rad, p)
+        if (pulse > 0f && !Motion.reduced && pm.length > 0f) {
+            val len = pm.length
+            val st = (1f - pulse) * len
+            val sl = len * 0.22f
+            seg.reset()
+            pm.getSegment(st, Math.min(len, st + sl), seg, true)
+            if (st + sl > len) pm.getSegment(0f, st + sl - len, seg, true)
+            p.strokeWidth = 4f * dens
+            p.strokeCap = Paint.Cap.ROUND
+            p.color = (((sinf((1f - pulse) * 3.1416f)).coerceIn(0f, 1f) * 255f).toInt() shl 24) or 0xE8FFF4
+            canvas.drawPath(seg, p)
+            p.strokeCap = Paint.Cap.BUTT
+        }
         canvas.restore()
         if (pulse > 0f) {
             p.strokeWidth = 2f * dens
@@ -969,7 +1064,7 @@ class AppCarousel(c: Context) : View(c) {
         val fr = Math.abs(pos - ni)
         val na = (1f - fr * 2f).coerceIn(0f, 1f)
         tp.alpha = (255 * na).toInt()
-        if (showName) canvas.drawText(apps[ni].label, cx, h * 0.93f, tp)
+        if (showName) canvas.drawText(apps[ni].label, cx, h * 0.93f + (if (Motion.reduced) 0f else (1f - na) * h * 0.025f), tp)
     }
 }
 
@@ -1018,7 +1113,14 @@ class MainActivity : Activity() {
     private fun focusScale(v: View) {
         v.setOnFocusChangeListener { view, f ->
             val s = if (f) 1.07f else 1f
-            view.animate().scaleX(s).scaleY(s).setDuration(140).start()
+            val ty = if (f) -dp(2).toFloat() else 0f
+            if (Motion.reduced) {
+                view.scaleX = s
+                view.scaleY = s
+                view.translationY = ty
+            } else {
+                view.animate().scaleX(s).scaleY(s).translationY(ty).setDuration(180).setInterpolator(DecelerateInterpolator()).start()
+            }
         }
     }
 
@@ -1077,6 +1179,7 @@ class MainActivity : Activity() {
             old?.uncaughtException(th, ex)
         }
 
+        Motion.reduced = prefs.getBoolean("reduce_motion", false)
         root = FrameLayout(this)
         root.addView(WallView(this), FrameLayout.LayoutParams(-1, -1))
         forest = ForestView(this)
@@ -1189,7 +1292,7 @@ class MainActivity : Activity() {
         applyWallpaper(wpIdx, false)
         initSounds()
         ready = true
-        if (prefs.getBoolean("startup_anim", true)) {
+        if (prefs.getBoolean("startup_anim", true) && !Motion.reduced) {
             colView.alpha = 0f
             colView.translationY = dp(14).toFloat()
             colView.animate().alpha(1f).translationY(0f).setStartDelay(200).setDuration(1100).start()
@@ -1512,7 +1615,7 @@ class MainActivity : Activity() {
             Wall.blur = blur
             Wall.mix = 0f
             val a = ValueAnimator.ofFloat(0f, 1f)
-            a.duration = 650
+            a.duration = 550
             a.addUpdateListener {
                 Wall.mix = it.animatedValue as Float
                 if (Wall.mix >= 1f) {
@@ -1626,18 +1729,35 @@ class MainActivity : Activity() {
         overlayOpener = opener
         root.addView(ov, FrameLayout.LayoutParams(-1, -1))
         colView.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
-        ov.alpha = 0f
-        ov.animate().alpha(1f).setDuration(180).start()
+        if (Motion.reduced || ov.childCount == 0) {
+            ov.alpha = 1f
+        } else {
+            val bx = ov.getChildAt(0)
+            ov.alpha = 0f
+            ov.animate().alpha(1f).setDuration(240).setInterpolator(DecelerateInterpolator()).start()
+            bx.scaleX = 0.94f
+            bx.scaleY = 0.94f
+            bx.translationY = dp(14).toFloat()
+            bx.animate().scaleX(1f).scaleY(1f).translationY(0f).setDuration(260).setInterpolator(DecelerateInterpolator()).start()
+        }
         ov.post { firstFocusable(ov)?.requestFocus() }
     }
 
     private fun hideOverlay() {
         val ov = overlay ?: return
         overlay = null
-        root.removeView(ov)
         colView.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         val o = overlayOpener
         if (o != null) o.requestFocus() else carousel.requestFocus()
+        if (Motion.reduced || ov.childCount == 0) {
+            root.removeView(ov)
+        } else {
+            ov.animate().cancel()
+            ov.isClickable = false
+            val bx = ov.getChildAt(0)
+            bx.animate().scaleX(0.96f).scaleY(0.96f).translationY(dp(8).toFloat()).setDuration(170).start()
+            ov.animate().alpha(0f).setDuration(170).withEndAction { root.removeView(ov) }.start()
+        }
     }
 
     private fun openWallpaperPanel() {
@@ -1790,6 +1910,10 @@ class MainActivity : Activity() {
         rows.add(optRow("Moon comes out around", { hourLabel(prefs.getInt("dn_set", 18)) }) { cycList("dn_set", 18, sets); updateTime() })
         rows.add(optRow("Sunrise and sunset blend", { prefs.getInt("dn_trans", 60).toString() + " min" }) { cycList("dn_trans", 60, trans); updateTime() })
         rows.add(optRow("Startup animation", { onOff("startup_anim", true) }) { toggle("startup_anim", true) })
+        rows.add(optRow("Reduce motion", { onOff("reduce_motion", false) }) {
+            toggle("reduce_motion", false)
+            Motion.reduced = prefs.getBoolean("reduce_motion", false)
+        })
         rows.add(optRow("Close", { "" }) { hideOverlay() })
         panelList("Clock, day/night, startup", rows)
     }
@@ -2716,6 +2840,21 @@ class MainActivity : Activity() {
         refreshMusic()
     }
 
+    private fun setTextFade(tv: TextView, s: String) {
+        if (tv.text.toString() == s) return
+        if (Motion.reduced || tv.text.isEmpty() || !tv.isShown) {
+            tv.animate().cancel()
+            tv.alpha = 1f
+            tv.text = s
+            return
+        }
+        tv.animate().cancel()
+        tv.animate().alpha(0f).setDuration(110).withEndAction {
+            tv.text = s
+            tv.animate().alpha(1f).setDuration(220).start()
+        }.start()
+    }
+
     private fun refreshMusic() {
         if (ready) syncForestSound()
         if (!ready) return
@@ -2745,8 +2884,8 @@ class MainActivity : Activity() {
             art = ownArt
             isPlaying = playing
         }
-        mTitle.text = title
-        mArtist.text = artist
+        setTextFade(mTitle, title)
+        setTextFade(mArtist, artist)
         if (art !== lastArt) {
             lastArt = art
             if (art != null) {
