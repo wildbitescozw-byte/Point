@@ -302,9 +302,27 @@ class DayNightView(c: Context) : View(c) {
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
     private var night = 0f
     private var nightTarget = 0f
+    private var warm = 0f
+    private var warmTarget = 0f
     private var lastMs = 0L
     private val moon = Path()
     private val cut = Path()
+
+    fun setPhase(nightFrac: Float, warmth: Float) {
+        nightTarget = nightFrac.coerceIn(0f, 1f)
+        warmTarget = warmth.coerceIn(0f, 1f)
+        invalidate()
+    }
+
+    private fun mix(a: Int, b: Int, t: Float): Int {
+        var out = 0
+        for (sh in intArrayOf(24, 16, 8, 0)) {
+            val ca = (a ushr sh) and 0xFF
+            val cb = (b ushr sh) and 0xFF
+            out = out or ((ca + ((cb - ca) * t).toInt()) shl sh)
+        }
+        return out
+    }
 
     fun setNight(n: Boolean) {
         nightTarget = if (n) 1f else 0f
@@ -317,6 +335,8 @@ class DayNightView(c: Context) : View(c) {
         lastMs = now
         if (night < nightTarget) night = Math.min(nightTarget, night + dt / 0.9f)
         else if (night > nightTarget) night = Math.max(nightTarget, night - dt / 0.9f)
+        if (warm < warmTarget) warm = Math.min(warmTarget, warm + dt / 0.9f)
+        else if (warm > warmTarget) warm = Math.max(warmTarget, warm - dt / 0.9f)
         val w = width.toFloat()
         val h = height.toFloat()
         val cx = w / 2f
@@ -335,14 +355,14 @@ class DayNightView(c: Context) : View(c) {
         canvas.scale(sc, sc, cx, cy)
         val pulse = 0.85f + 0.15f * sinf(t * 2f)
         p.style = Paint.Style.FILL
-        p.shader = RadialGradient(cx, cy, r * pulse, 0x99FFC93C.toInt(), 0x00FFC93C, Shader.TileMode.CLAMP)
+        p.shader = RadialGradient(cx, cy, r * pulse, mix(0x99FFC93C.toInt(), 0x99FF6A2A.toInt(), warm), mix(0x00FFC93C, 0x00FF6A2A, warm), Shader.TileMode.CLAMP)
         p.alpha = (255 * a).toInt()
         canvas.drawCircle(cx, cy, r, p)
         p.shader = null
         p.style = Paint.Style.STROKE
         p.strokeWidth = r * 0.11f
         p.strokeCap = Paint.Cap.ROUND
-        p.color = 0xFFFFB02E.toInt()
+        p.color = mix(0xFFFFB02E.toInt(), 0xFFFF7A2E.toInt(), warm)
         p.alpha = (255 * a).toInt()
         canvas.save()
         canvas.rotate(t * 18f, cx, cy)
@@ -354,7 +374,7 @@ class DayNightView(c: Context) : View(c) {
         }
         canvas.restore()
         p.style = Paint.Style.FILL
-        p.shader = RadialGradient(cx - r * 0.1f, cy - r * 0.1f, r * 0.42f, 0xFFFFF1A8.toInt(), 0xFFFF9F1C.toInt(), Shader.TileMode.CLAMP)
+        p.shader = RadialGradient(cx - r * 0.1f, cy - r * 0.1f, r * 0.42f, mix(0xFFFFF1A8.toInt(), 0xFFFFC27A.toInt(), warm), mix(0xFFFF9F1C.toInt(), 0xFFFF5A1F.toInt(), warm), Shader.TileMode.CLAMP)
         p.alpha = (255 * a).toInt()
         canvas.drawCircle(cx, cy, r * 0.38f, p)
         p.shader = null
@@ -1246,7 +1266,7 @@ class MainActivity : Activity() {
 
     private fun applyForest() {
         if (!ready) return
-        forest.enabled = prefs.getBoolean("forest_on", true)
+        forest.enabled = prefs.getBoolean("forest_on", true) && prefs.getBoolean("forest_wp_" + wpIdx, true)
         forest.birdsOn = prefs.getBoolean("forest_birds", true)
         forest.fxOn = prefs.getBoolean("forest_fx", true)
         forest.activity = prefs.getInt("forest_act", 1).coerceIn(0, 2)
@@ -1277,7 +1297,7 @@ class MainActivity : Activity() {
     private fun syncForestSound() {
         if (!ready) return
         val sel = prefs.getInt("forest_snd", 0)
-        var want = sel in 1..3 && prefs.getBoolean("forest_on", true) && resumed
+        var want = sel in 1..3 && prefs.getBoolean("forest_on", true) && prefs.getBoolean("forest_wp_" + wpIdx, true) && resumed
         if (want && ambient) {
             val m = prefs.getInt("amb_mode", 0)
             if (m == 0 || m == 3 || prefs.getInt("amb_forest", 1) == 0) want = false
@@ -1514,6 +1534,7 @@ class MainActivity : Activity() {
         Wall.scrim = 0x55000000
         wpIdx = i
         prefs.edit().putInt("wp", i).apply()
+        applyForest()
     }
 
     private fun invalidateAll(v: View) {
@@ -1713,7 +1734,7 @@ class MainActivity : Activity() {
                 Toast.makeText(this, "This TV has no notification access screen.", Toast.LENGTH_LONG).show()
             }
         })
-        rows.add(optRow("Startup animation", { onOff("startup_anim", true) }) { toggle("startup_anim", true) })
+        rows.add(optRow("Clock, day/night, startup", { "Open" }) { openClockPanel() })
         rows.add(optRow("Close", { "" }) { hideOverlay() })
         for (r in rows) {
             val lp = LinearLayout.LayoutParams(-1, dp(44))
@@ -1750,6 +1771,27 @@ class MainActivity : Activity() {
         rows.add(optRow("Remember last app", { onOff("remember_app", true) }) { toggle("remember_app", true) })
         rows.add(optRow("Close", { "" }) { hideOverlay() })
         panelList("Carousel and sounds", rows)
+    }
+
+    private fun cycList(k: String, def: Int, vals: IntArray) {
+        val i = vals.indexOf(prefs.getInt(k, def))
+        prefs.edit().putInt(k, vals[(i + 1) % vals.size]).apply()
+    }
+
+    private fun hourLabel(h: Int): String = if (prefs.getBoolean("clock_24", false)) String.format("%02d:00", h) else (if (h % 12 == 0) 12 else h % 12).toString() + (if (h < 12) " am" else " pm")
+
+    private fun openClockPanel() {
+        val rises = intArrayOf(4, 5, 6, 7, 8, 9)
+        val sets = intArrayOf(16, 17, 18, 19, 20, 21)
+        val trans = intArrayOf(30, 60, 90, 120)
+        val rows = ArrayList<GlassBox>()
+        rows.add(optRow("24-hour clock", { onOff("clock_24", false) }) { toggle("clock_24", false); updateTime() })
+        rows.add(optRow("Sun comes up around", { hourLabel(prefs.getInt("dn_rise", 6)) }) { cycList("dn_rise", 6, rises); updateTime() })
+        rows.add(optRow("Moon comes out around", { hourLabel(prefs.getInt("dn_set", 18)) }) { cycList("dn_set", 18, sets); updateTime() })
+        rows.add(optRow("Sunrise and sunset blend", { prefs.getInt("dn_trans", 60).toString() + " min" }) { cycList("dn_trans", 60, trans); updateTime() })
+        rows.add(optRow("Startup animation", { onOff("startup_anim", true) }) { toggle("startup_anim", true) })
+        rows.add(optRow("Close", { "" }) { hideOverlay() })
+        panelList("Clock, day/night, startup", rows)
     }
 
     private fun openGreetingPanel() {
@@ -1797,6 +1839,7 @@ class MainActivity : Activity() {
         val ints = arrayOf("Low", "Medium", "High")
         val rows = ArrayList<GlassBox>()
         rows.add(optRow("Living Forest", { onOff("forest_on", true) }) { toggle("forest_on", true); applyForest() })
+        rows.add(optRow("Forest on this wallpaper (" + wpNames[wpIdx - 1] + ")", { onOff("forest_wp_" + wpIdx, true) }) { toggle("forest_wp_" + wpIdx, true); applyForest() })
         rows.add(optRow("Bird animations", { onOff("forest_birds", true) }) { toggle("forest_birds", true); applyForest() })
         rows.add(optRow("Forest ambient effects", { onOff("forest_fx", true) }) { toggle("forest_fx", true); applyForest() })
         rows.add(optRow("Bird activity", { acts[prefs.getInt("forest_act", 1).coerceIn(0, 2)] }) { cyc("forest_act", 1, 3); applyForest() })
@@ -2116,13 +2159,31 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun nightPhase(): FloatArray {
+        val c = Calendar.getInstance()
+        val m = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE)
+        val rise = prefs.getInt("dn_rise", 6) * 60
+        val set = prefs.getInt("dn_set", 18) * 60
+        val tr = prefs.getInt("dn_trans", 60).coerceIn(10, 240)
+        val half = tr / 2f
+        val frac: Float = when {
+            m >= set - half && m <= set + half -> (m - (set - half)) / tr
+            m >= rise - half && m <= rise + half -> 1f - (m - (rise - half)) / tr
+            m > rise + half && m < set - half -> 0f
+            else -> 1f
+        }
+        val warmth = if (frac > 0f && frac < 1f) 4f * frac * (1f - frac) else 0f
+        return floatArrayOf(frac, warmth)
+    }
+
     private fun updateTime() {
         val now = Date()
-        val t = SimpleDateFormat("h:mm", Locale.getDefault()).format(now)
+        val h24 = prefs.getBoolean("clock_24", false)
+        val t = SimpleDateFormat(if (h24) "H:mm" else "h:mm", Locale.getDefault()).format(now)
         val ampm = SimpleDateFormat("a", Locale.getDefault()).format(now)
         val dstr = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(now)
         clock.text = t
-        date.text = dstr + "  \u2022  " + ampm
+        date.text = if (h24) dstr else dstr + "  \u2022  " + ampm
         ambientView.timeText = t
         ambientView.dateText = dstr
         val showSong = musicPlaying && mTitle.text.isNotEmpty() && prefs.getBoolean("amb_song", true)
@@ -2132,7 +2193,8 @@ class MainActivity : Activity() {
         ambientView.art = if (showSong) lastArt else null
 
         val hr = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-        dn.setNight(hr < 6 || hr >= 18)
+        val ph = nightPhase()
+        dn.setPhase(ph[0], ph[1])
         val part = when {
             hr in 5..11 -> "Good morning"
             hr in 12..16 -> "Good afternoon"
@@ -2212,6 +2274,8 @@ class MainActivity : Activity() {
     private lateinit var mBar: ProgressBarView
     private lateinit var mEq: EqView
     private lateinit var mPlayIcon: ImageView
+    private lateinit var prevBtn: View
+    private lateinit var nextBtn: View
 
     private val progTick = object : Runnable {
         override fun run() {
@@ -2412,11 +2476,13 @@ class MainActivity : Activity() {
         row.clipChildren = false
         row.setPadding(0, dp(10), 0, 0)
         shuffle = prefs.getBoolean("shuffle", false)
-        row.addView(iconBtn(android.R.drawable.ic_media_previous) { prevTrack() }, bl(1f))
+        prevBtn = iconBtn(android.R.drawable.ic_media_previous) { prevTrack() }
+        row.addView(prevBtn, bl(1f))
         val pb = iconBtn(android.R.drawable.ic_media_play) { togglePlay() }
         mPlayIcon = pb.getChildAt(0) as ImageView
         row.addView(pb, bl(1.2f))
-        row.addView(iconBtn(android.R.drawable.ic_media_next) { nextTrack() }, bl(1f))
+        nextBtn = iconBtn(android.R.drawable.ic_media_next) { nextTrack() }
+        row.addView(nextBtn, bl(1f))
         shufBtn = smallPill("Shuffle") {
             shuffle = !shuffle
             prefs.edit().putBoolean("shuffle", shuffle).apply()
@@ -2696,6 +2762,17 @@ class MainActivity : Activity() {
         )
         mEq.active = isPlaying
         musicPlaying = isPlaying
+        var prevOk = true
+        var nextOk = true
+        if (!playing && e != null) {
+            val acts = e.playbackState?.actions ?: 0L
+            if (acts != 0L) {
+                prevOk = (acts and PlaybackState.ACTION_SKIP_TO_PREVIOUS) != 0L
+                nextOk = (acts and PlaybackState.ACTION_SKIP_TO_NEXT) != 0L
+            }
+        }
+        prevBtn.alpha = if (prevOk) 1f else 0.35f
+        nextBtn.alpha = if (nextOk) 1f else 0.35f
         if (mp == null && e == null) {
             mBar.fraction = 0f
             mTime.text = "0:00"
