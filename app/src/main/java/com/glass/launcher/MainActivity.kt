@@ -1,6 +1,15 @@
 package com.glass.launcher
 
+import android.Manifest
 import android.app.Activity
+import android.content.ContentUris
+import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.MediaPlayer
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import android.widget.Toast
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -118,7 +127,7 @@ class GlassBox(c: Context) : LinearLayout(c) {
     }
 }
 
-// Big iOS-style glass digits: frosted body, glossy tint and a bright rim.
+// Big iOS-style glass digits: frosted body, glossy tint and a bright outer rim.
 class GlassClock(c: Context) : View(c) {
     var text: String = ""
         set(v) {
@@ -133,25 +142,29 @@ class GlassClock(c: Context) : View(c) {
 
     init {
         p.typeface = Typeface.create("sans-serif-black", Typeface.NORMAL)
-        p.textAlign = Paint.Align.CENTER
+        p.textAlign = Paint.Align.LEFT
+        p.strokeJoin = Paint.Join.ROUND
     }
 
     override fun onDraw(canvas: Canvas) {
         if (text.isEmpty() || width == 0 || height == 0) return
         val w = width.toFloat()
         val h = height.toFloat()
+        val rim = 2.2f * dens
+        val pad = rim + 1.5f * dens
         p.shader = null
         p.clearShadowLayer()
         p.style = Paint.Style.FILL
         var size = h * 1.25f
         p.textSize = size
         val tw = p.measureText(text)
-        if (tw > w * 0.97f) {
-            size *= (w * 0.97f) / tw
+        val maxW = w - 2f * pad
+        if (tw > maxW) {
+            size *= maxW / tw
             p.textSize = size
         }
         p.getTextBounds(text, 0, text.length, b)
-        val x = w / 2f
+        val x = pad - b.left
         val y = h / 2f - (b.top + b.bottom) / 2f
 
         // 1. soft shadow
@@ -160,7 +173,15 @@ class GlassClock(c: Context) : View(c) {
         canvas.drawText(text, x, y, p)
         p.clearShadowLayer()
 
-        // 2. frosted body (blurred wallpaper showing through the digits)
+        // 2. rim light. Drawn BEFORE the body, so the body covers the inner half
+        //    of the stroke and no overlapping-contour lines show inside the digits.
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = rim * 2f
+        p.color = 0xCCFFFFFF.toInt()
+        canvas.drawText(text, x, y, p)
+        p.style = Paint.Style.FILL
+
+        // 3. frosted body (blurred wallpaper showing through the digits)
         val bl = Wall.blur
         if (bl != null) {
             getLocationInWindow(loc)
@@ -171,20 +192,36 @@ class GlassClock(c: Context) : View(c) {
             sh.setLocalMatrix(m)
             p.shader = sh
             p.color = 0xFFFFFFFF.toInt()
-            canvas.drawText(text, x, y, p)
+        } else {
+            p.shader = null
+            p.color = 0xFF6C7A89.toInt()
         }
+        canvas.drawText(text, x, y, p)
 
-        // 3. glossy tint, brighter at the top
+        // 4. glossy tint, brighter at the top
         p.shader = LinearGradient(0f, y + b.top, 0f, y + b.bottom, 0x77FFFFFF, 0x22FFFFFF, Shader.TileMode.CLAMP)
         canvas.drawText(text, x, y, p)
-
-        // 4. rim light
         p.shader = null
-        p.style = Paint.Style.STROKE
-        p.strokeWidth = 2.2f * dens
-        p.color = 0xB8FFFFFF.toInt()
-        canvas.drawText(text, x, y, p)
-        p.style = Paint.Style.FILL
+    }
+}
+
+class ProgressBarView(c: Context) : View(c) {
+    var fraction: Float = 0f
+        set(v) {
+            field = v
+            invalidate()
+        }
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val r = RectF()
+    override fun onDraw(canvas: Canvas) {
+        val h = height.toFloat()
+        val w = width.toFloat()
+        p.color = 0x44FFFFFF
+        r.set(0f, 0f, w, h)
+        canvas.drawRoundRect(r, h / 2f, h / 2f, p)
+        p.color = 0xEEFFFFFF.toInt()
+        r.set(0f, 0f, w * fraction.coerceIn(0f, 1f), h)
+        canvas.drawRoundRect(r, h / 2f, h / 2f, p)
     }
 }
 
@@ -297,13 +334,14 @@ class MainActivity : Activity() {
 
         val left = LinearLayout(this)
         left.orientation = LinearLayout.VERTICAL
-        left.gravity = Gravity.CENTER
+        left.gravity = Gravity.START or Gravity.CENTER_VERTICAL
         left.clipChildren = false
 
         date = TextView(this)
         date.setTextColor(0xE6FFFFFF.toInt())
         date.textSize = 20f
-        date.gravity = Gravity.CENTER
+        date.gravity = Gravity.START
+        date.setPadding(dp(3), 0, 0, 0)
         date.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         date.setShadowLayer(8f, 0f, 2f, 0x66000000)
         left.addView(date, LinearLayout.LayoutParams(-2, -2))
@@ -356,18 +394,56 @@ class MainActivity : Activity() {
         super.onResume()
         if (!ready) return
         build()
+        if (tracks.isEmpty() && hasAudioPerm()) loadTracks()
+        refreshMusic()
         handler.post(tick)
+        handler.post(progTick)
     }
 
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(tick)
+        handler.removeCallbacks(progTick)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try { mp?.release() } catch (e: Throwable) {}
+        mp = null
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (ready) {
+            loadTracks()
+            refreshMusic()
+        }
     }
 
     @Deprecated("Launcher ignores Back")
     override fun onBackPressed() {}
 
-    // ---------- music tab ----------
+    // ---------- music player (plays songs from the TV / USB itself) ----------
+    private class Track(val uri: Uri, val title: String, val artist: String)
+
+    private var tracks = ArrayList<Track>()
+    private var mp: MediaPlayer? = null
+    private var idx = 0
+    private var playing = false
+    private var errors = 0
+    private lateinit var mTitle: TextView
+    private lateinit var mArtist: TextView
+    private lateinit var mTime: TextView
+    private lateinit var mBar: ProgressBarView
+    private lateinit var mPlayIcon: ImageView
+
+    private val progTick = object : Runnable {
+        override fun run() {
+            updateProgress()
+            handler.postDelayed(this, 1000)
+        }
+    }
+
     private fun bl(weight: Float): LinearLayout.LayoutParams {
         val p = LinearLayout.LayoutParams(0, dp(46), weight)
         p.setMargins(dp(3), 0, dp(3), 0)
@@ -394,53 +470,225 @@ class MainActivity : Activity() {
         card.clipChildren = false
         card.setPadding(dp(16), dp(14), dp(16), dp(14))
 
-        val t = TextView(this)
-        t.text = "Music"
-        t.setTextColor(0xFFFFFFFF.toInt())
-        t.textSize = 20f
-        t.setTypeface(null, Typeface.BOLD)
-        card.addView(t)
+        mTitle = TextView(this)
+        mTitle.setTextColor(0xFFFFFFFF.toInt())
+        mTitle.textSize = 18f
+        mTitle.setTypeface(null, Typeface.BOLD)
+        mTitle.maxLines = 1
+        mTitle.ellipsize = TextUtils.TruncateAt.END
+        card.addView(mTitle, LinearLayout.LayoutParams(-1, -2))
 
-        val s = TextView(this)
-        s.text = "Controls whatever is playing"
-        s.setTextColor(0xB3FFFFFF.toInt())
-        s.textSize = 13f
-        card.addView(s)
+        mArtist = TextView(this)
+        mArtist.setTextColor(0xB3FFFFFF.toInt())
+        mArtist.textSize = 13f
+        mArtist.maxLines = 1
+        mArtist.ellipsize = TextUtils.TruncateAt.END
+        card.addView(mArtist, LinearLayout.LayoutParams(-1, -2))
+
+        val pr = LinearLayout(this)
+        pr.orientation = LinearLayout.HORIZONTAL
+        pr.gravity = Gravity.CENTER_VERTICAL
+        pr.setPadding(0, dp(10), 0, 0)
+        mBar = ProgressBarView(this)
+        pr.addView(mBar, LinearLayout.LayoutParams(0, dp(5), 1f))
+        mTime = TextView(this)
+        mTime.setTextColor(0xB3FFFFFF.toInt())
+        mTime.textSize = 12f
+        mTime.setPadding(dp(10), 0, 0, 0)
+        pr.addView(mTime)
+        card.addView(pr, LinearLayout.LayoutParams(-1, -2))
 
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
         row.clipChildren = false
-        row.setPadding(0, dp(12), 0, 0)
-        row.addView(iconBtn(android.R.drawable.ic_media_previous) { mediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS) }, bl(1f))
-        row.addView(iconBtn(android.R.drawable.ic_media_play) { mediaKey(KeyEvent.KEYCODE_MEDIA_PLAY) }, bl(1f))
-        row.addView(iconBtn(android.R.drawable.ic_media_pause) { mediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE) }, bl(1f))
-        row.addView(iconBtn(android.R.drawable.ic_media_next) { mediaKey(KeyEvent.KEYCODE_MEDIA_NEXT) }, bl(1f))
-        row.addView(pill("Open") { openMusic() }, bl(1.6f))
+        row.setPadding(0, dp(10), 0, 0)
+        row.addView(iconBtn(android.R.drawable.ic_media_previous) { prevTrack() }, bl(1f))
+        val pb = iconBtn(android.R.drawable.ic_media_play) { togglePlay() }
+        mPlayIcon = pb.getChildAt(0) as ImageView
+        row.addView(pb, bl(1.3f))
+        row.addView(iconBtn(android.R.drawable.ic_media_next) { nextTrack() }, bl(1f))
+        row.addView(pill("VLC") { openMusic() }, bl(1.3f))
         card.addView(row, LinearLayout.LayoutParams(-1, -2))
         return card
     }
 
-    private fun mediaKey(code: Int) {
+    private fun permName(): String =
+        if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO
+        else Manifest.permission.READ_EXTERNAL_STORAGE
+
+    private fun hasAudioPerm(): Boolean =
+        checkSelfPermission(permName()) == PackageManager.PERMISSION_GRANTED
+
+    private fun askPerm() {
         try {
-            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
-            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
-        } catch (e: Throwable) {}
+            requestPermissions(arrayOf(permName()), 1)
+        } catch (e: Throwable) {
+            Toast.makeText(
+                this,
+                "Can't show the permission prompt. Enable it in Settings > Apps > Glass Home > Permissions.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun loadTracks() {
+        val list = ArrayList<Track>()
+        if (hasAudioPerm()) {
+            try {
+                val base = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+                val proj = arrayOf(
+                    MediaStore.Audio.Media._ID,
+                    MediaStore.Audio.Media.TITLE,
+                    MediaStore.Audio.Media.ARTIST
+                )
+                val c = contentResolver.query(
+                    base, proj,
+                    MediaStore.Audio.Media.DURATION + " >= 30000", null,
+                    MediaStore.Audio.Media.TITLE + " COLLATE NOCASE ASC"
+                )
+                if (c != null) {
+                    while (c.moveToNext() && list.size < 3000) {
+                        val id = c.getLong(0)
+                        val title = c.getString(1) ?: "Unknown"
+                        var artist = c.getString(2) ?: ""
+                        if (artist.isEmpty() || artist == "<unknown>") artist = "Unknown artist"
+                        list.add(Track(ContentUris.withAppendedId(base, id), title, artist))
+                    }
+                    c.close()
+                }
+            } catch (e: Exception) {}
+        }
+        tracks = list
+        idx = prefs.getInt("mIdx", 0)
+        if (idx < 0 || idx >= tracks.size) idx = 0
+    }
+
+    private fun ensureTracks(): Boolean {
+        errors = 0
+        if (!hasAudioPerm()) {
+            askPerm()
+            return false
+        }
+        if (tracks.isEmpty()) loadTracks()
+        refreshMusic()
+        return tracks.isNotEmpty()
+    }
+
+    private fun togglePlay() {
+        if (!ensureTracks()) return
+        val m = mp
+        if (m == null) {
+            playIndex(idx)
+            return
+        }
+        try {
+            if (m.isPlaying) {
+                m.pause()
+                playing = false
+            } else {
+                m.start()
+                playing = true
+            }
+        } catch (e: Throwable) {
+            playIndex(idx)
+            return
+        }
+        refreshMusic()
+    }
+
+    private fun nextTrack() {
+        if (ensureTracks()) playIndex(idx + 1)
+    }
+
+    private fun prevTrack() {
+        if (ensureTracks()) playIndex(idx - 1)
+    }
+
+    private fun playIndex(i: Int) {
+        if (tracks.isEmpty()) return
+        idx = ((i % tracks.size) + tracks.size) % tracks.size
+        prefs.edit().putInt("mIdx", idx).apply()
+        try { mp?.release() } catch (e: Throwable) {}
+        mp = null
+        playing = false
+        mBar.fraction = 0f
+        try {
+            val m = MediaPlayer()
+            m.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .build()
+            )
+            m.setDataSource(this, tracks[idx].uri)
+            m.setOnPreparedListener { pm ->
+                errors = 0
+                pm.start()
+                playing = true
+                refreshMusic()
+            }
+            m.setOnCompletionListener { playIndex(idx + 1) }
+            m.setOnErrorListener { _, _, _ ->
+                errors++
+                if (errors < 5) {
+                    playIndex(idx + 1)
+                } else {
+                    playing = false
+                    refreshMusic()
+                }
+                true
+            }
+            mp = m
+            m.prepareAsync()
+        } catch (e: Throwable) {
+            Toast.makeText(this, "Can't play this file", Toast.LENGTH_SHORT).show()
+        }
+        refreshMusic()
+    }
+
+    private fun refreshMusic() {
+        if (!hasAudioPerm()) {
+            mTitle.text = "Allow music access"
+            mArtist.text = "Select play to load your songs"
+        } else if (tracks.isEmpty()) {
+            mTitle.text = "No music found"
+            mArtist.text = "Add songs to the TV or plug in a USB drive"
+        } else {
+            val t = tracks[idx]
+            mTitle.text = t.title
+            mArtist.text = t.artist
+        }
+        mPlayIcon.setImageResource(
+            if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+        )
+        if (mp == null) {
+            mBar.fraction = 0f
+            mTime.text = "0:00"
+        }
+    }
+
+    private fun fmt(ms: Int): String {
+        val s = ms / 1000
+        return (s / 60).toString() + ":" + (s % 60).toString().padStart(2, '0')
+    }
+
+    private fun updateProgress() {
+        val m = mp
+        if (m != null && playing) {
+            try {
+                val d = m.duration
+                val pos = m.currentPosition
+                mBar.fraction = if (d > 0) pos.toFloat() / d else 0f
+                mTime.text = fmt(pos) + " / " + fmt(d)
+            } catch (e: Throwable) {}
+        }
     }
 
     private fun hasPkg(p: String): Boolean =
         try { packageManager.getPackageInfo(p, 0); true } catch (e: Exception) { false }
 
     private fun openMusic() {
-        if (hasPkg(vlc)) {
-            launch(vlc)
-            return
-        }
-        try {
-            val i = Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_MUSIC)
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(i)
-        } catch (e: Throwable) {}
+        if (hasPkg(vlc)) launch(vlc)
     }
 
     // ---------- wallpaper ----------
