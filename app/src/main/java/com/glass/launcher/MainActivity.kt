@@ -1,19 +1,15 @@
 package com.glass.launcher
 
-import android.Manifest
 import android.app.Activity
-import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.LinearGradient
 import android.graphics.Matrix
-import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RadialGradient
@@ -22,27 +18,21 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
-import android.net.Uri
-import android.os.Build
+import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.MediaStore
 import android.provider.Settings
-import android.text.SpannableString
 import android.text.TextUtils
-import android.text.style.RelativeSizeSpan
 import android.util.Log
-import android.util.Size
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.Toast
 import android.widget.TextView
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -208,7 +198,6 @@ class MainActivity : Activity() {
     private lateinit var cardHolder: FrameLayout
     private lateinit var wpPill: GlassBox
     private val handler = Handler(Looper.getMainLooper())
-    private var asked = false
     private var ready = false
     private val prefs: SharedPreferences by lazy { getSharedPreferences("glass", Context.MODE_PRIVATE) }
 
@@ -241,7 +230,7 @@ class MainActivity : Activity() {
     private fun pill(text: String, onClick: () -> Unit): GlassBox {
         val b = GlassBox(this)
         b.gravity = Gravity.CENTER
-        b.setPadding(dp(20), dp(9), dp(20), dp(9))
+        b.setPadding(dp(16), dp(9), dp(16), dp(9))
         b.isFocusable = true
         b.isClickable = true
         b.setOnClickListener { onClick() }
@@ -249,7 +238,7 @@ class MainActivity : Activity() {
         val t = TextView(this)
         t.text = text
         t.setTextColor(0xFFF5F8FC.toInt())
-        t.textSize = 16f
+        t.textSize = 15f
         b.addView(t)
         return b
     }
@@ -281,6 +270,7 @@ class MainActivity : Activity() {
             } catch (x: Throwable) {}
             old?.uncaughtException(th, ex)
         }
+
         root = FrameLayout(this)
         root.addView(WallView(this), FrameLayout.LayoutParams(-1, -1))
 
@@ -300,38 +290,47 @@ class MainActivity : Activity() {
         }, plp())
         col.addView(head, LinearLayout.LayoutParams(-1, -2))
 
-        // clock + VLC card
+        // date + glass clock + greeting tab, tightly grouped, plus the music tab
         val topRow = LinearLayout(this)
         topRow.orientation = LinearLayout.HORIZONTAL
         topRow.clipChildren = false
 
         val left = LinearLayout(this)
         left.orientation = LinearLayout.VERTICAL
-        left.gravity = Gravity.CENTER_HORIZONTAL
+        left.gravity = Gravity.CENTER
         left.clipChildren = false
+
         date = TextView(this)
         date.setTextColor(0xE6FFFFFF.toInt())
-        date.textSize = 24f
+        date.textSize = 20f
         date.gravity = Gravity.CENTER
         date.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         date.setShadowLayer(8f, 0f, 2f, 0x66000000)
-        left.addView(date, LinearLayout.LayoutParams(-1, -2))
+        left.addView(date, LinearLayout.LayoutParams(-2, -2))
+
         clock = GlassClock(this)
-        left.addView(clock, LinearLayout.LayoutParams(-1, 0, 1f))
+        val clockH = (resources.displayMetrics.heightPixels * 0.26f).toInt()
+        left.addView(clock, LinearLayout.LayoutParams(-1, clockH))
+
+        val greetBox = GlassBox(this)
+        greetBox.gravity = Gravity.CENTER
+        greetBox.setPadding(dp(24), dp(8), dp(24), dp(8))
         greet = TextView(this)
-        greet.textSize = 32f
-        greet.gravity = Gravity.CENTER
+        greet.textSize = 24f
         greet.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        greet.setShadowLayer(10f, 0f, 2f, 0x66000000)
-        left.addView(greet, LinearLayout.LayoutParams(-1, -2))
-        val clp = LinearLayout.LayoutParams(0, -1, 1.5f)
-        clp.setMargins(0, dp(4), dp(12), dp(4))
-        topRow.addView(left, clp)
+        greet.setShadowLayer(8f, 0f, 2f, 0x66000000)
+        greetBox.addView(greet)
+        left.addView(greetBox, LinearLayout.LayoutParams(-2, -2))
+
+        val lp = LinearLayout.LayoutParams(0, -1, 1.7f)
+        lp.setMargins(0, dp(4), dp(12), dp(4))
+        topRow.addView(left, lp)
 
         cardHolder = FrameLayout(this)
         cardHolder.clipChildren = false
+        cardHolder.addView(musicCard(), FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL))
         val hlp = LinearLayout.LayoutParams(0, -1, 1f)
-        hlp.setMargins(dp(12), dp(8), 0, dp(8))
+        hlp.setMargins(dp(12), dp(4), 0, dp(4))
         topRow.addView(cardHolder, hlp)
         col.addView(topRow, LinearLayout.LayoutParams(-1, 0, 1f))
 
@@ -347,7 +346,6 @@ class MainActivity : Activity() {
         hsv.addView(strip, ViewGroup.LayoutParams(-2, -2))
         col.addView(hsv, LinearLayout.LayoutParams(-1, -2))
 
-
         root.addView(col, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
         applyWallpaper(prefs.getInt("wp", 1))
@@ -361,30 +359,89 @@ class MainActivity : Activity() {
         handler.post(tick)
     }
 
-    private fun askPerm() {
-        try {
-            requestPermissions(arrayOf(permName()), 1)
-        } catch (e: Throwable) {
-            Toast.makeText(
-                this,
-                "This TV cannot show the permission prompt. Enable it in Settings > Apps > Glass Home > Permissions.",
-                Toast.LENGTH_LONG
-            ).show()
-        }
-    }
-
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(tick)
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (ready) build()
-    }
-
     @Deprecated("Launcher ignores Back")
     override fun onBackPressed() {}
+
+    // ---------- music tab ----------
+    private fun bl(weight: Float): LinearLayout.LayoutParams {
+        val p = LinearLayout.LayoutParams(0, dp(46), weight)
+        p.setMargins(dp(3), 0, dp(3), 0)
+        return p
+    }
+
+    private fun iconBtn(res: Int, onClick: () -> Unit): GlassBox {
+        val b = GlassBox(this)
+        b.gravity = Gravity.CENTER
+        b.isFocusable = true
+        b.isClickable = true
+        b.setOnClickListener { onClick() }
+        focusScale(b)
+        val iv = ImageView(this)
+        iv.setImageResource(res)
+        iv.setColorFilter(0xFFFFFFFF.toInt())
+        b.addView(iv, LinearLayout.LayoutParams(dp(24), dp(24)))
+        return b
+    }
+
+    private fun musicCard(): GlassBox {
+        val card = GlassBox(this)
+        card.orientation = LinearLayout.VERTICAL
+        card.clipChildren = false
+        card.setPadding(dp(16), dp(14), dp(16), dp(14))
+
+        val t = TextView(this)
+        t.text = "Music"
+        t.setTextColor(0xFFFFFFFF.toInt())
+        t.textSize = 20f
+        t.setTypeface(null, Typeface.BOLD)
+        card.addView(t)
+
+        val s = TextView(this)
+        s.text = "Controls whatever is playing"
+        s.setTextColor(0xB3FFFFFF.toInt())
+        s.textSize = 13f
+        card.addView(s)
+
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.clipChildren = false
+        row.setPadding(0, dp(12), 0, 0)
+        row.addView(iconBtn(android.R.drawable.ic_media_previous) { mediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS) }, bl(1f))
+        row.addView(iconBtn(android.R.drawable.ic_media_play) { mediaKey(KeyEvent.KEYCODE_MEDIA_PLAY) }, bl(1f))
+        row.addView(iconBtn(android.R.drawable.ic_media_pause) { mediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE) }, bl(1f))
+        row.addView(iconBtn(android.R.drawable.ic_media_next) { mediaKey(KeyEvent.KEYCODE_MEDIA_NEXT) }, bl(1f))
+        row.addView(pill("Open") { openMusic() }, bl(1.6f))
+        card.addView(row, LinearLayout.LayoutParams(-1, -2))
+        return card
+    }
+
+    private fun mediaKey(code: Int) {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+        } catch (e: Throwable) {}
+    }
+
+    private fun hasPkg(p: String): Boolean =
+        try { packageManager.getPackageInfo(p, 0); true } catch (e: Exception) { false }
+
+    private fun openMusic() {
+        if (hasPkg(vlc)) {
+            launch(vlc)
+            return
+        }
+        try {
+            val i = Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_MUSIC)
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(i)
+        } catch (e: Throwable) {}
+    }
 
     // ---------- wallpaper ----------
     private fun cycleWallpaper() {
@@ -475,8 +532,8 @@ class MainActivity : Activity() {
 
     // ---------- apps ----------
     private fun cellLp(): LinearLayout.LayoutParams {
-        val lp = LinearLayout.LayoutParams(dp(120), dp(128))
-        lp.setMargins(dp(8), dp(4), dp(8), dp(4))
+        val lp = LinearLayout.LayoutParams(dp(112), dp(120))
+        lp.setMargins(dp(7), dp(4), dp(7), dp(4))
         return lp
     }
 
@@ -488,7 +545,6 @@ class MainActivity : Activity() {
             strip.addView(t, cellLp())
             if (first == null) first = t
         }
-        buildCard()
         updateTime()
         if (currentFocus == null) first?.requestFocus()
     }
@@ -505,11 +561,11 @@ class MainActivity : Activity() {
         val iv = ImageView(this)
         iv.setImageDrawable(a.icon)
         iv.scaleType = ImageView.ScaleType.FIT_CENTER
-        t.addView(iv, LinearLayout.LayoutParams(dp(56), dp(56)))
+        t.addView(iv, LinearLayout.LayoutParams(dp(52), dp(52)))
         val tv = TextView(this)
         tv.text = a.label
         tv.setTextColor(0xFFF5F8FC.toInt())
-        tv.textSize = 14f
+        tv.textSize = 13f
         tv.maxLines = 1
         tv.ellipsize = TextUtils.TruncateAt.END
         tv.gravity = Gravity.CENTER
@@ -541,148 +597,5 @@ class MainActivity : Activity() {
         }
         val idx = { p: String -> val i = favs.indexOf(p); if (i < 0) 999 else i }
         return out.sortedWith(compareBy<App>({ idx(it.pkg) }, { it.label.lowercase() }))
-    }
-
-    // ---------- VLC card ----------
-    private fun permName(): String =
-        if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_VIDEO
-        else Manifest.permission.READ_EXTERNAL_STORAGE
-
-    private fun hasVideoPerm(): Boolean =
-        checkSelfPermission(permName()) == PackageManager.PERMISSION_GRANTED
-
-    private fun hasPkg(p: String): Boolean =
-        try { packageManager.getPackageInfo(p, 0); true } catch (e: Exception) { false }
-
-    private fun pretty(name: String): String =
-        name.substringBeforeLast('.').replace('.', ' ').replace('_', ' ').trim()
-
-    private fun newestVideo(): Pair<Uri, String>? {
-        var result: Pair<Uri, String>? = null
-        try {
-            val proj = arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME)
-            val c = contentResolver.query(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI, proj, null, null,
-                MediaStore.Video.Media.DATE_ADDED + " DESC"
-            )
-            if (c != null) {
-                if (c.moveToFirst()) {
-                    val id = c.getLong(0)
-                    val name = c.getString(1) ?: "Video"
-                    result = Pair(ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id), name)
-                }
-                c.close()
-            }
-        } catch (e: Exception) {}
-        return result
-    }
-
-    private fun thumb(uri: Uri): Bitmap? {
-        return try {
-            if (Build.VERSION.SDK_INT >= 29) {
-                contentResolver.loadThumbnail(uri, Size(480, 270), null)
-            } else {
-                MediaStore.Video.Thumbnails.getThumbnail(
-                    contentResolver, ContentUris.parseId(uri),
-                    MediaStore.Video.Thumbnails.MINI_KIND, null
-                )
-            }
-        } catch (e: Throwable) {
-            null
-        }
-    }
-
-    private fun playVideo(uri: Uri, name: String) {
-        prefs.edit().putString("lastUri", uri.toString()).putString("lastName", name).apply()
-        val i = Intent(Intent.ACTION_VIEW)
-        i.setDataAndType(uri, "video/*")
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        if (hasPkg(vlc)) i.setPackage(vlc)
-        try { startActivity(i) } catch (e: Exception) {}
-    }
-
-    private fun buildCard() {
-        cardHolder.removeAllViews()
-        val card = GlassBox(this)
-        card.orientation = LinearLayout.HORIZONTAL
-        card.gravity = Gravity.CENTER_VERTICAL
-        card.setPadding(dp(14), dp(14), dp(14), dp(14))
-        card.isFocusable = true
-        card.isClickable = true
-        focusScale(card)
-
-        val iv = ImageView(this)
-        iv.scaleType = ImageView.ScaleType.CENTER_CROP
-        iv.setBackgroundColor(0x33000000)
-        iv.clipToOutline = true
-        val rad = dp(12).toFloat()
-        iv.outlineProvider = object : ViewOutlineProvider() {
-            override fun getOutline(view: View, outline: Outline) {
-                outline.setRoundRect(0, 0, view.width, view.height, rad)
-            }
-        }
-        card.addView(iv, LinearLayout.LayoutParams(dp(170), dp(100)))
-
-        val textCol = LinearLayout(this)
-        textCol.orientation = LinearLayout.VERTICAL
-        textCol.setPadding(dp(14), 0, 0, 0)
-        val l1 = TextView(this)
-        l1.setTextColor(0xFFBFEFFF.toInt())
-        l1.textSize = 14f
-        val l2 = TextView(this)
-        l2.setTextColor(0xFFFFFFFF.toInt())
-        l2.textSize = 20f
-        l2.setTypeface(null, Typeface.BOLD)
-        l2.maxLines = 2
-        l2.ellipsize = TextUtils.TruncateAt.END
-        val l3 = TextView(this)
-        l3.setTextColor(0xB3FFFFFF.toInt())
-        l3.textSize = 14f
-        textCol.addView(l1)
-        textCol.addView(l2)
-        textCol.addView(l3)
-        card.addView(textCol, LinearLayout.LayoutParams(0, -2, 1f))
-
-        var uri: Uri? = null
-        var name = ""
-        var label = ""
-        val perm = hasVideoPerm()
-        val last = prefs.getString("lastUri", null)
-        if (last != null) {
-            uri = Uri.parse(last)
-            name = prefs.getString("lastName", "Video") ?: "Video"
-            label = "Continue watching"
-        } else if (perm) {
-            val v = newestVideo()
-            if (v != null) {
-                uri = v.first
-                name = v.second
-                label = "Recently added"
-            }
-        }
-
-        val target = uri
-        if (target != null) {
-            val title = name
-            l1.text = label
-            l2.text = pretty(title)
-            l3.text = "Play in VLC"
-            card.setOnClickListener { playVideo(target, title) }
-            Thread {
-                val b = thumb(target)
-                if (b != null) runOnUiThread { iv.setImageBitmap(b) }
-            }.start()
-        } else if (!perm) {
-            l1.text = "VLC"
-            l2.text = "Show your latest movie here"
-            l3.text = "Select to allow video access"
-            card.setOnClickListener { askPerm() }
-        } else {
-            l1.text = "VLC"
-            l2.text = "No videos found yet"
-            l3.text = "Select to open VLC"
-            card.setOnClickListener { launch(vlc) }
-        }
-        cardHolder.addView(card, FrameLayout.LayoutParams(-1, -1))
     }
 }
