@@ -9,8 +9,10 @@ import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.Path
@@ -30,6 +32,7 @@ import android.provider.Settings
 import android.text.SpannableString
 import android.text.TextUtils
 import android.text.style.RelativeSizeSpan
+import android.util.Log
 import android.util.Size
 import android.view.Gravity
 import android.view.View
@@ -39,6 +42,7 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.Toast
 import android.widget.TextView
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -124,10 +128,80 @@ class GlassBox(c: Context) : LinearLayout(c) {
     }
 }
 
+// Big iOS-style glass digits: frosted body, glossy tint and a bright rim.
+class GlassClock(c: Context) : View(c) {
+    var text: String = ""
+        set(v) {
+            field = v
+            invalidate()
+        }
+    private val dens = c.resources.displayMetrics.density
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val b = Rect()
+    private val loc = IntArray(2)
+    private val m = Matrix()
+
+    init {
+        p.typeface = Typeface.create("sans-serif-black", Typeface.NORMAL)
+        p.textAlign = Paint.Align.CENTER
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        if (text.isEmpty() || width == 0 || height == 0) return
+        val w = width.toFloat()
+        val h = height.toFloat()
+        p.shader = null
+        p.clearShadowLayer()
+        p.style = Paint.Style.FILL
+        var size = h * 1.25f
+        p.textSize = size
+        val tw = p.measureText(text)
+        if (tw > w * 0.97f) {
+            size *= (w * 0.97f) / tw
+            p.textSize = size
+        }
+        p.getTextBounds(text, 0, text.length, b)
+        val x = w / 2f
+        val y = h / 2f - (b.top + b.bottom) / 2f
+
+        // 1. soft shadow
+        p.color = 0x22000000
+        p.setShadowLayer(16f * dens, 0f, 6f * dens, 0x66000000)
+        canvas.drawText(text, x, y, p)
+        p.clearShadowLayer()
+
+        // 2. frosted body (blurred wallpaper showing through the digits)
+        val bl = Wall.blur
+        if (bl != null) {
+            getLocationInWindow(loc)
+            m.reset()
+            m.setScale(Wall.w.toFloat() / bl.width, Wall.h.toFloat() / bl.height)
+            m.postTranslate(-(loc[0] - Wall.ox).toFloat(), -(loc[1] - Wall.oy).toFloat())
+            val sh = BitmapShader(bl, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            sh.setLocalMatrix(m)
+            p.shader = sh
+            p.color = 0xFFFFFFFF.toInt()
+            canvas.drawText(text, x, y, p)
+        }
+
+        // 3. glossy tint, brighter at the top
+        p.shader = LinearGradient(0f, y + b.top, 0f, y + b.bottom, 0x77FFFFFF, 0x22FFFFFF, Shader.TileMode.CLAMP)
+        canvas.drawText(text, x, y, p)
+
+        // 4. rim light
+        p.shader = null
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 2.2f * dens
+        p.color = 0xB8FFFFFF.toInt()
+        canvas.drawText(text, x, y, p)
+        p.style = Paint.Style.FILL
+    }
+}
+
 class MainActivity : Activity() {
     private val vlc = "org.videolan.vlc"
     private lateinit var root: FrameLayout
-    private lateinit var clock: TextView
+    private lateinit var clock: GlassClock
     private lateinit var date: TextView
     private lateinit var greet: TextView
     private lateinit var strip: LinearLayout
@@ -135,6 +209,7 @@ class MainActivity : Activity() {
     private lateinit var wpPill: GlassBox
     private val handler = Handler(Looper.getMainLooper())
     private var asked = false
+    private var ready = false
     private val prefs: SharedPreferences by lazy { getSharedPreferences("glass", Context.MODE_PRIVATE) }
 
     private val wps = intArrayOf(R.drawable.wp1, R.drawable.wp2, R.drawable.wp3, R.drawable.wp4)
@@ -187,6 +262,25 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val prev = prefs.getString("crash", null)
+        if (prev != null) {
+            prefs.edit().remove("crash").commit()
+            val et = TextView(this)
+            et.setTextColor(0xFFFFFFFF.toInt())
+            et.setBackgroundColor(0xFF200000.toInt())
+            et.textSize = 15f
+            et.setPadding(dp(30), dp(30), dp(30), dp(30))
+            et.text = "Glass Home crashed last time. Take a screenshot of this and send it to Claude, then reopen the app.\n\n" + prev
+            setContentView(et)
+            return
+        }
+        val old = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { th, ex ->
+            try {
+                prefs.edit().putString("crash", Log.getStackTraceString(ex).take(1200)).commit()
+            } catch (x: Throwable) {}
+            old?.uncaughtException(th, ex)
+        }
         root = FrameLayout(this)
         root.addView(WallView(this), FrameLayout.LayoutParams(-1, -1))
 
@@ -211,26 +305,28 @@ class MainActivity : Activity() {
         topRow.orientation = LinearLayout.HORIZONTAL
         topRow.clipChildren = false
 
-        val clockBox = GlassBox(this)
-        clockBox.orientation = LinearLayout.VERTICAL
-        clockBox.gravity = Gravity.CENTER
-        clockBox.setPadding(dp(24), dp(12), dp(24), dp(12))
-        clock = TextView(this)
-        clock.setTextColor(0xF2FFFFFF.toInt())
-        clock.textSize = 88f
-        clock.includeFontPadding = false
-        clock.typeface = Typeface.create("sans-serif-thin", Typeface.NORMAL)
-        clock.setShadowLayer(16f, 0f, 4f, 0x55000000)
-        clock.gravity = Gravity.CENTER
+        val left = LinearLayout(this)
+        left.orientation = LinearLayout.VERTICAL
+        left.gravity = Gravity.CENTER_HORIZONTAL
+        left.clipChildren = false
         date = TextView(this)
-        date.setTextColor(0xCCFFFFFF.toInt())
-        date.textSize = 22f
+        date.setTextColor(0xE6FFFFFF.toInt())
+        date.textSize = 24f
         date.gravity = Gravity.CENTER
-        clockBox.addView(clock)
-        clockBox.addView(date)
+        date.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        date.setShadowLayer(8f, 0f, 2f, 0x66000000)
+        left.addView(date, LinearLayout.LayoutParams(-1, -2))
+        clock = GlassClock(this)
+        left.addView(clock, LinearLayout.LayoutParams(-1, 0, 1f))
+        greet = TextView(this)
+        greet.textSize = 32f
+        greet.gravity = Gravity.CENTER
+        greet.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        greet.setShadowLayer(10f, 0f, 2f, 0x66000000)
+        left.addView(greet, LinearLayout.LayoutParams(-1, -2))
         val clp = LinearLayout.LayoutParams(0, -1, 1.5f)
-        clp.setMargins(0, dp(8), dp(12), dp(8))
-        topRow.addView(clockBox, clp)
+        clp.setMargins(0, dp(4), dp(12), dp(4))
+        topRow.addView(left, clp)
 
         cardHolder = FrameLayout(this)
         cardHolder.clipChildren = false
@@ -251,31 +347,29 @@ class MainActivity : Activity() {
         hsv.addView(strip, ViewGroup.LayoutParams(-2, -2))
         col.addView(hsv, LinearLayout.LayoutParams(-1, -2))
 
-        // greeting under the apps
-        val greetBox = GlassBox(this)
-        greetBox.gravity = Gravity.CENTER
-        greetBox.setPadding(dp(28), dp(10), dp(28), dp(10))
-        greet = TextView(this)
-        greet.textSize = 30f
-        greet.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        greet.setShadowLayer(10f, 0f, 2f, 0x66000000)
-        greetBox.addView(greet)
-        val glp = LinearLayout.LayoutParams(-2, -2)
-        glp.setMargins(dp(4), dp(6), 0, dp(6))
-        col.addView(greetBox, glp)
 
         root.addView(col, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
         applyWallpaper(prefs.getInt("wp", 1))
+        ready = true
     }
 
     override fun onResume() {
         super.onResume()
+        if (!ready) return
         build()
         handler.post(tick)
-        if (!hasVideoPerm() && !asked) {
-            asked = true
+    }
+
+    private fun askPerm() {
+        try {
             requestPermissions(arrayOf(permName()), 1)
+        } catch (e: Throwable) {
+            Toast.makeText(
+                this,
+                "This TV cannot show the permission prompt. Enable it in Settings > Apps > Glass Home > Permissions.",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -286,7 +380,7 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        build()
+        if (ready) build()
     }
 
     @Deprecated("Launcher ignores Back")
@@ -358,12 +452,9 @@ class MainActivity : Activity() {
     // ---------- clock + greeting ----------
     private fun updateTime() {
         val now = Date()
-        val t = SimpleDateFormat("h:mm a", Locale.getDefault()).format(now)
-        val sp = SpannableString(t)
-        val idx = t.indexOfFirst { !it.isDigit() && it != ':' }
-        if (idx > 0) sp.setSpan(RelativeSizeSpan(0.3f), idx, t.length, 0)
-        clock.text = sp
-        date.text = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(now)
+        clock.text = SimpleDateFormat("h:mm", Locale.getDefault()).format(now)
+        date.text = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(now) +
+            "  \u2022  " + SimpleDateFormat("a", Locale.getDefault()).format(now)
 
         val hr = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
         val part = when {
@@ -585,7 +676,7 @@ class MainActivity : Activity() {
             l1.text = "VLC"
             l2.text = "Show your latest movie here"
             l3.text = "Select to allow video access"
-            card.setOnClickListener { requestPermissions(arrayOf(permName()), 1) }
+            card.setOnClickListener { askPerm() }
         } else {
             l1.text = "VLC"
             l2.text = "No videos found yet"
