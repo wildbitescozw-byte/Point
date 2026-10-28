@@ -739,6 +739,10 @@ class AppCarousel(c: Context) : View(c) {
     var onLaunch: ((App) -> Unit)? = null
     var onStep: (() -> Unit)? = null
     var onLock: (() -> Unit)? = null
+    var speed = 13.0
+    var iconScale = 1f
+    var clearNeighbours = false
+    var showName = true
     private val dens = c.resources.displayMetrics.density
     private var pos = 0f
     private var target = 0
@@ -819,7 +823,7 @@ class AppCarousel(c: Context) : View(c) {
             var again = false
             val diff = target - pos
             if (Math.abs(diff) > 0.003f) {
-                pos += diff * (1f - Math.exp(-13.0 * dt).toFloat())
+                pos += diff * (1f - Math.exp(-speed * dt).toFloat())
                 again = true
                 settled = false
             } else if (!settled) {
@@ -889,7 +893,7 @@ class AppCarousel(c: Context) : View(c) {
         // icons glide past the frame; the nearest one is largest and brightest
         val gap1 = f * 1.08f
         val gap2 = f * 0.60f
-        val base = f * 0.80f
+        val base = f * 0.80f * iconScale
         val first = Math.max(0, (pos - 5f).toInt())
         val last = Math.min(apps.size - 1, (pos + 5f).toInt() + 1)
         val order = (first..last).sortedByDescending { Math.abs(it - pos) }
@@ -898,7 +902,7 @@ class AppCarousel(c: Context) : View(c) {
             val d = i - pos
             val ad = Math.abs(d)
             val s = 0.36f + 0.64f / (1f + 1.6f * ad * ad)
-            val a = 0.15f + 0.85f / (1f + 0.9f * ad * ad)
+            val a = if (clearNeighbours) 0.32f + 0.68f / (1f + 0.5f * ad * ad) else 0.15f + 0.85f / (1f + 0.9f * ad * ad)
             val off = if (ad <= 1f) ad * gap1 else gap1 + (ad - 1f) * gap2
             val x = cx + (if (d < 0f) -off else off)
             val size = base * s
@@ -945,7 +949,7 @@ class AppCarousel(c: Context) : View(c) {
         val fr = Math.abs(pos - ni)
         val na = (1f - fr * 2f).coerceIn(0f, 1f)
         tp.alpha = (255 * na).toInt()
-        canvas.drawText(apps[ni].label, cx, h * 0.93f, tp)
+        if (showName) canvas.drawText(apps[ni].label, cx, h * 0.93f, tp)
     }
 }
 
@@ -1145,10 +1149,11 @@ class MainActivity : Activity() {
         // central-lock carousel
         carousel = AppCarousel(this)
         carousel.onLaunch = { a -> launch(a.pkg) }
+        applyCarousel()
         carousel.onStep = { playGlide() }
         carousel.onLock = {
             playLock()
-            carousel.selectedPkg()?.let { prefs.edit().putString("last_app", it).apply() }
+            if (prefs.getBoolean("remember_app", true)) carousel.selectedPkg()?.let { prefs.edit().putString("last_app", it).apply() }
         }
         val carH = (resources.displayMetrics.heightPixels * 0.33f).toInt()
         col.addView(carousel, LinearLayout.LayoutParams(-1, carH))
@@ -1693,18 +1698,9 @@ class MainActivity : Activity() {
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
         col.clipChildren = false
-        val vols = intArrayOf(20, 40, 60, 80, 100)
         val rows = ArrayList<GlassBox>()
-        rows.add(optRow("Sound effects", { if (prefs.getBoolean("sfx_on", true)) "On" else "Off" }) {
-            prefs.edit().putBoolean("sfx_on", !prefs.getBoolean("sfx_on", true)).apply()
-        })
-        rows.add(optRow("Sound effects volume", { prefs.getInt("sfx_vol", 70).toString() + "%" }) {
-            val cur = prefs.getInt("sfx_vol", 70)
-            var nx = vols[0]
-            for (i in vols.indices) if (vols[i] > cur) { nx = vols[i]; break }
-            prefs.edit().putInt("sfx_vol", nx).apply()
-            playGlide()
-        })
+        rows.add(optRow("Carousel and sounds", { "Open" }) { openCarouselPanel() })
+        rows.add(optRow("Greeting messages", { "Open" }) { openGreetingPanel() })
         rows.add(optRow("Living Forest settings", { "Open" }) { openForestPanel() })
         rows.add(optRow("Ambient mode and inactivity", { "Open" }) { openAmbientPanel() })
         rows.add(optRow("Reminders and appointments", { loadAppts().size.toString() }) {
@@ -1725,6 +1721,53 @@ class MainActivity : Activity() {
             col.addView(r, lp)
         }
         showOverlay(overlayShell("Glass Home options", col, 0.62f), optPill)
+    }
+
+    private fun applyCarousel() {
+        carousel.speed = doubleArrayOf(8.0, 13.0, 20.0)[prefs.getInt("car_speed", 1).coerceIn(0, 2)]
+        carousel.iconScale = if (prefs.getInt("car_size", 0) == 1) 1.05f else 1f
+        carousel.clearNeighbours = prefs.getInt("car_nb", 0) == 1
+        carousel.showName = prefs.getBoolean("car_name", true)
+        carousel.invalidate()
+    }
+
+    private fun openCarouselPanel() {
+        val vols = intArrayOf(20, 40, 60, 80, 100)
+        val speeds = arrayOf("Smooth", "Normal", "Quick")
+        val rows = ArrayList<GlassBox>()
+        rows.add(optRow("Sound effects", { onOff("sfx_on", true) }) { toggle("sfx_on", true) })
+        rows.add(optRow("Sound effects volume", { prefs.getInt("sfx_vol", 70).toString() + "%" }) {
+            val cur = prefs.getInt("sfx_vol", 70)
+            var nx = vols[0]
+            for (i in vols.indices) if (vols[i] > cur) { nx = vols[i]; break }
+            prefs.edit().putInt("sfx_vol", nx).apply()
+            playGlide()
+        })
+        rows.add(optRow("Glide speed", { speeds[prefs.getInt("car_speed", 1).coerceIn(0, 2)] }) { cyc("car_speed", 1, 3); applyCarousel() })
+        rows.add(optRow("Selected icon size", { if (prefs.getInt("car_size", 0) == 1) "Large" else "Standard" }) { cyc("car_size", 0, 2); applyCarousel() })
+        rows.add(optRow("Neighbouring apps", { if (prefs.getInt("car_nb", 0) == 1) "Clearer" else "Subtle" }) { cyc("car_nb", 0, 2); applyCarousel() })
+        rows.add(optRow("Show app name", { onOff("car_name", true) }) { toggle("car_name", true); applyCarousel() })
+        rows.add(optRow("Remember last app", { onOff("remember_app", true) }) { toggle("remember_app", true) })
+        rows.add(optRow("Close", { "" }) { hideOverlay() })
+        panelList("Carousel and sounds", rows)
+    }
+
+    private fun openGreetingPanel() {
+        val secs = intArrayOf(10, 20, 30, 60, 120, 300)
+        val rows = ArrayList<GlassBox>()
+        rows.add(optRow("Message changes every", { prefs.getInt("msg_sec", 20).let { if (it >= 60) (it / 60).toString() + " min" else "$it sec" } }) {
+            val cur = prefs.getInt("msg_sec", 20)
+            val i = secs.indexOf(cur)
+            prefs.edit().putInt("msg_sec", secs[(i + 1) % secs.size]).apply()
+            handler.removeCallbacks(msgTick)
+            handler.postDelayed(msgTick, 1000)
+        })
+        rows.add(optRow("Family messages (Nia, Vee)", { onOff("cat_fam", true) }) { toggle("cat_fam", true) })
+        rows.add(optRow("Daily life messages", { onOff("cat_day", true) }) { toggle("cat_day", true) })
+        rows.add(optRow("Entertainment messages", { onOff("cat_ent", true) }) { toggle("cat_ent", true) })
+        rows.add(optRow("Reminders and Nia's age", { onOff("cat_rem", true) }) { toggle("cat_rem", true) })
+        rows.add(optRow("Close", { "" }) { hideOverlay() })
+        panelList("Greeting messages", rows)
     }
 
     private fun onOff(k: String, def: Boolean): String = if (prefs.getBoolean(k, def)) "On" else "Off"
@@ -1994,29 +2037,37 @@ class MainActivity : Activity() {
         return out
     }
 
+    private fun msgCat(t: String): Int = when {
+        t.contains("Nia") || t.contains("Vee") -> 0
+        t.contains("watching") || t.contains("music") || t.contains("relaxing") || t.contains("movie") -> 2
+        else -> 1
+    }
+
     private fun nextMessage(): String {
         val slot = slotNow()
         val dow = Calendar.getInstance().get(Calendar.DAY_OF_WEEK)
         val weekend = dow == Calendar.SATURDAY || dow == Calendar.SUNDAY
         val pool = ArrayList<String>()
-        val rem = reminderLines()
+        val remAll = reminderLines()
+        val remOn = prefs.getBoolean("cat_rem", true)
+        val rem = if (remOn) remAll else ArrayList<String>()
         for (r in rem) {
             pool.add(r)
             pool.add(r)
             pool.add(r)
         }
         val total = daysBetween(dobCal(), todayCal())
-        if (total >= 0) {
+        if (remOn && total >= 0) {
             val age = "Nia is " + niaAge() + " old today."
             pool.add(age)
             pool.add(age)
         }
-        val ms = milestone()
+        val ms = if (remOn) milestone() else null
         if (ms != null) {
             for (i in 0 until 4) pool.add(ms)
         }
         var hasVacc = false
-        for (r in rem) {
+        for (r in remAll) {
             val l = r.lowercase()
             if (l.contains("vacc") || l.contains("immun") || l.contains("jab")) hasVacc = true
         }
@@ -2026,8 +2077,13 @@ class MainActivity : Activity() {
             if (m.day == 2 && dow != Calendar.MONDAY) continue
             if (m.day == 3 && dow != Calendar.FRIDAY) continue
             if (hasVacc && m.text.contains("vaccination schedule")) continue
+            val c = msgCat(m.text)
+            if (c == 0 && !prefs.getBoolean("cat_fam", true)) continue
+            if (c == 1 && !prefs.getBoolean("cat_day", true)) continue
+            if (c == 2 && !prefs.getBoolean("cat_ent", true)) continue
             for (i in 0 until m.weight) pool.add(m.text)
         }
+        if (pool.isEmpty()) return "Welcome home."
         var fresh = pool.filter { !recent.contains(it) }
         if (fresh.isEmpty()) {
             recent.clear()
@@ -2042,7 +2098,7 @@ class MainActivity : Activity() {
     private val msgTick = object : Runnable {
         override fun run() {
             showMessage()
-            handler.postDelayed(this, 20000)
+            handler.postDelayed(this, prefs.getInt("msg_sec", 20).coerceIn(10, 600) * 1000L)
         }
     }
 
@@ -2095,7 +2151,7 @@ class MainActivity : Activity() {
 
     // ================= apps =================
     private fun build() {
-        carousel.updateApps(loadApps(), prefs.getString("last_app", null))
+        carousel.updateApps(loadApps(), if (prefs.getBoolean("remember_app", true)) prefs.getString("last_app", null) else null)
         updateTime()
         if (currentFocus == null) carousel.requestFocus()
     }
