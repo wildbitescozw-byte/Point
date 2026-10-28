@@ -426,7 +426,7 @@ class DayNightView(c: Context) : View(c) {
 // Ambient screensaver: dimmed wallpaper, slow drifting glows and a floating clock.
 // Subtle living-forest layer drawn above the wallpaper: birds, light shafts, mist and drifting motes.
 class ForestView(c: Context) : View(c) {
-    var enabled = true
+    var forestOn = true
     var birdsOn = true
     var fxOn = true
     var activity = 1
@@ -645,7 +645,7 @@ class ForestView(c: Context) : View(c) {
     }
 
     override fun onDraw(canvas: Canvas) {
-        if (!enabled || !running || width == 0) return
+        if (!forestOn || !running || width == 0) return
         val now = SystemClock.uptimeMillis()
         val dt = if (lastMs == 0L) 0f else Math.min(0.25f, (now - lastMs) / 1000f)
         lastMs = now
@@ -1266,7 +1266,7 @@ class MainActivity : Activity() {
 
     private fun applyForest() {
         if (!ready) return
-        forest.enabled = prefs.getBoolean("forest_on", true) && prefs.getBoolean("forest_wp_" + wpIdx, true)
+        forest.forestOn = prefs.getBoolean("forest_on", true) && prefs.getBoolean("forest_wp_" + wpIdx, true)
         forest.birdsOn = prefs.getBoolean("forest_birds", true)
         forest.fxOn = prefs.getBoolean("forest_fx", true)
         forest.activity = prefs.getInt("forest_act", 1).coerceIn(0, 2)
