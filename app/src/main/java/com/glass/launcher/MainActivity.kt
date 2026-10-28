@@ -404,10 +404,248 @@ class DayNightView(c: Context) : View(c) {
 }
 
 // Ambient screensaver: dimmed wallpaper, slow drifting glows and a floating clock.
+// Subtle living-forest layer drawn above the wallpaper: birds, light shafts, mist and drifting motes.
+class ForestView(c: Context) : View(c) {
+    var enabled = true
+    var birdsOn = true
+    var fxOn = true
+    var activity = 1
+    var intensity = 1
+    var calm = 1f
+    private var running = false
+    private var unit = 1f
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val path = Path()
+    private val shaftPath = Path()
+    private val oval = RectF()
+    private val rnd = java.util.Random()
+    private var lastMs = 0L
+    private var clock = 0f
+    private var nextSpawn = 0f
+    private var shaft: LinearGradient? = null
+    private var mist: RadialGradient? = null
+    private var mistR = 1f
+    private val mx = FloatArray(28)
+    private val my = FloatArray(28)
+    private val mph = FloatArray(28)
+    private val msp = FloatArray(28)
+
+    private class Bird {
+        var x = 0f
+        var y = 0f
+        var baseY = 0f
+        var vx = 0f
+        var size = 0f
+        var depth = 0f
+        var phase = 0f
+        var flapRate = 16f
+        var amp = 1f
+        var flapping = true
+        var timer = 1f
+        var wob = 0f
+        var wobSpeed = 0.5f
+        var alpha = 120
+    }
+
+    private val birds = ArrayList<Bird>()
+
+    fun setRunning(r: Boolean) {
+        val was = running
+        running = r
+        lastMs = 0L
+        if (r && !was) nextSpawn = clock + 6f + rnd.nextFloat() * 10f
+        if (!r) birds.clear()
+        invalidate()
+    }
+
+    override fun onDetachedFromWindow() {
+        running = false
+        super.onDetachedFromWindow()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        super.onSizeChanged(w, h, ow, oh)
+        if (w <= 0 || h <= 0) return
+        shaft = LinearGradient(0f, 0f, 0f, h * 0.9f, 0x66FFF1C2, 0x00FFF1C2, Shader.TileMode.CLAMP)
+        mistR = w * 0.32f
+        mist = RadialGradient(0f, 0f, mistR, 0x55E6F4EA, 0x00E6F4EA, Shader.TileMode.CLAMP)
+        for (i in 0 until 28) {
+            mx[i] = rnd.nextFloat() * w
+            my[i] = rnd.nextFloat() * h
+            mph[i] = rnd.nextFloat() * 6.28f
+            msp[i] = 0.4f + rnd.nextFloat() * 0.8f
+        }
+    }
+
+    private fun schedule() {
+        val lo: Float
+        val hi: Float
+        when (activity) {
+            0 -> { lo = 70f; hi = 160f }
+            2 -> { lo = 14f; hi = 45f }
+            else -> { lo = 35f; hi = 95f }
+        }
+        nextSpawn = clock + (lo + rnd.nextFloat() * (hi - lo)) / Math.max(0.2f, calm)
+    }
+
+    private fun spawn(w: Int, h: Int) {
+        val dir = if (rnd.nextBoolean()) 1f else -1f
+        val d0 = rnd.nextFloat()
+        val depth = d0 * d0
+        val size = (6f + depth * 20f) * unit
+        val speed = (45f + depth * 75f + rnd.nextFloat() * 30f) * unit
+        val y = h * (0.07f + rnd.nextFloat() * 0.5f)
+        val count = if (rnd.nextFloat() < 0.22f && birds.size < 3) 2 else 1
+        for (i in 0 until count) {
+            val b = Bird()
+            b.depth = depth
+            b.size = size * (0.92f + rnd.nextFloat() * 0.16f)
+            b.vx = dir * speed * (0.95f + rnd.nextFloat() * 0.1f)
+            b.x = if (dir > 0f) -size * 3f - i * size * 3.5f else w + size * 3f + i * size * 3.5f
+            b.baseY = y + (if (i == 0) 0f else (rnd.nextFloat() - 0.5f) * size * 3f)
+            b.y = b.baseY
+            b.flapRate = 14f + rnd.nextFloat() * 6f
+            b.phase = rnd.nextFloat() * 6.28f
+            b.flapping = rnd.nextBoolean()
+            b.amp = if (b.flapping) 1f else 0.1f
+            b.timer = 1f + rnd.nextFloat() * 2f
+            b.wob = rnd.nextFloat() * 6.28f
+            b.wobSpeed = 0.3f + rnd.nextFloat() * 0.5f
+            b.alpha = (60f + depth * 140f).toInt()
+            birds.add(b)
+        }
+    }
+
+    private fun step(dt: Float, w: Int, h: Int) {
+        clock += dt
+        if (!birdsOn) {
+            birds.clear()
+            return
+        }
+        if (clock >= nextSpawn) {
+            if (birds.size < 4) spawn(w, h)
+            schedule()
+        }
+        val it = birds.iterator()
+        while (it.hasNext()) {
+            val b = it.next()
+            b.x += b.vx * dt
+            b.timer -= dt
+            if (b.timer <= 0f) {
+                b.flapping = !b.flapping
+                b.timer = if (b.flapping) 1.2f + rnd.nextFloat() * 1.8f else 1.5f + rnd.nextFloat() * 2.5f
+            }
+            val target = if (b.flapping) 1f else 0.1f
+            b.amp += (target - b.amp) * Math.min(1f, dt * 4f)
+            b.phase += dt * b.flapRate * (0.35f + 0.65f * b.amp)
+            b.y = b.baseY + sinf(clock * b.wobSpeed + b.wob) * b.size * 1.3f
+            if ((b.vx > 0f && b.x > w + b.size * 4f) || (b.vx < 0f && b.x < -b.size * 4f)) it.remove()
+        }
+    }
+
+    private fun drawBird(canvas: Canvas, b: Bird) {
+        val s = b.size
+        val wy = sinf(b.phase) * b.amp * s * 0.55f - s * 0.08f
+        val dirS = if (b.vx >= 0f) 1f else -1f
+        canvas.save()
+        canvas.translate(b.x, b.y)
+        p.color = (b.alpha shl 24) or 0x0B1712
+        path.reset()
+        path.moveTo(-s, wy)
+        path.quadTo(-s * 0.5f, -s * 0.32f + wy * 0.35f, 0f, -s * 0.02f)
+        path.quadTo(s * 0.5f, -s * 0.32f + wy * 0.35f, s, wy)
+        path.quadTo(s * 0.5f, s * 0.02f + wy * 0.2f, 0f, s * 0.2f)
+        path.quadTo(-s * 0.5f, s * 0.02f + wy * 0.2f, -s, wy)
+        path.close()
+        canvas.drawPath(path, p)
+        oval.set(-s * 0.2f, -s * 0.04f, s * 0.2f, s * 0.2f)
+        canvas.drawOval(oval, p)
+        canvas.drawCircle(dirS * s * 0.2f, s * 0.02f, s * 0.09f, p)
+        path.reset()
+        path.moveTo(-dirS * s * 0.12f, s * 0.1f)
+        path.lineTo(-dirS * s * 0.42f, s * 0.2f)
+        path.lineTo(-dirS * s * 0.12f, s * 0.22f)
+        path.close()
+        canvas.drawPath(path, p)
+        canvas.restore()
+    }
+
+    private fun drawFx(canvas: Canvas, w: Int, h: Int, dt: Float, f: Float) {
+        val sh = shaft
+        if (sh != null) {
+            p.shader = sh
+            val len = h * 0.9f
+            val dx = h * 0.42f
+            val xs = floatArrayOf(0.55f, 0.72f, 0.9f)
+            val ws = floatArrayOf(0.07f, 0.04f, 0.09f)
+            for (i in 0..2) {
+                val a = 0.5f + 0.5f * sinf(clock * (0.15f + 0.05f * i) + i * 2.1f)
+                p.alpha = (255f * 0.30f * a * f).toInt().coerceIn(0, 255)
+                val sx = w * xs[i] + sinf(clock * 0.04f + i) * w * 0.03f
+                val bw = w * ws[i]
+                shaftPath.reset()
+                shaftPath.moveTo(sx, 0f)
+                shaftPath.lineTo(sx + bw, 0f)
+                shaftPath.lineTo(sx + bw - dx, len)
+                shaftPath.lineTo(sx - dx, len)
+                shaftPath.close()
+                canvas.drawPath(shaftPath, p)
+            }
+            p.shader = null
+        }
+        val ms = mist
+        if (ms != null) {
+            p.shader = ms
+            for (i in 0..2) {
+                val a = 0.5f + 0.5f * sinf(clock * 0.11f + i * 1.7f)
+                p.alpha = (255f * 0.55f * a * f).toInt().coerceIn(0, 255)
+                val x = w * (0.2f + 0.3f * i) + sinf(clock * 0.03f + i * 2f) * w * 0.12f
+                val y = h * (0.72f + 0.06f * i)
+                canvas.save()
+                canvas.translate(x, y)
+                canvas.scale(1f, 0.38f)
+                canvas.drawCircle(0f, 0f, mistR, p)
+                canvas.restore()
+            }
+            p.shader = null
+        }
+        val n = intArrayOf(10, 18, 28)[intensity.coerceIn(0, 2)]
+        p.color = 0xFFFFF4D6.toInt()
+        for (i in 0 until n) {
+            mx[i] += sinf(clock * msp[i] + mph[i]) * dt * 10f * unit
+            my[i] += msp[i] * dt * 4f * unit
+            if (my[i] > h) { my[i] = 0f; mx[i] = rnd.nextFloat() * w }
+            if (mx[i] < 0f) mx[i] += w.toFloat()
+            if (mx[i] > w) mx[i] -= w.toFloat()
+            val a = 0.5f + 0.5f * sinf(clock * msp[i] * 2f + mph[i])
+            p.alpha = ((50f + 110f * a) * f).toInt().coerceIn(0, 255)
+            canvas.drawCircle(mx[i], my[i], (1.2f + msp[i] * 1.3f) * unit, p)
+        }
+        p.alpha = 255
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        if (!enabled || !running || width == 0) return
+        val now = SystemClock.uptimeMillis()
+        val dt = if (lastMs == 0L) 0f else Math.min(0.25f, (now - lastMs) / 1000f)
+        lastMs = now
+        val w = width
+        val h = height
+        unit = h / 1080f
+        step(dt, w, h)
+        val f = floatArrayOf(0.55f, 1f, 1.5f)[intensity.coerceIn(0, 2)] * calm
+        if (fxOn) drawFx(canvas, w, h, dt, f)
+        for (b in birds) drawBird(canvas, b)
+        val d = if (birds.isNotEmpty()) 33L else if (fxOn) 66L else 400L
+        postInvalidateDelayed(d)
+    }
+}
+
 class AmbientView(c: Context) : View(c) {
     var timeText = ""
     var dateText = ""
     var noteText = ""
+    var mode = 0
     var art: Bitmap? = null
     private val artPath = Path()
     private val artRect = RectF()
@@ -446,6 +684,19 @@ class AmbientView(c: Context) : View(c) {
         val w = width.toFloat()
         val h = height.toFloat()
         val t = SystemClock.uptimeMillis() / 1000f
+        if (mode == 1 || mode == 3) return
+        if (mode == 2) {
+            val cx = w * (0.86f + 0.02f * sinf(t * 0.02f))
+            val cy = h * (0.9f + 0.02f * cosf(t * 0.017f))
+            tp.textSize = h * 0.07f
+            tp.color = 0xAAFFFFFF.toInt()
+            canvas.drawText(timeText, cx, cy, tp)
+            tp.textSize = h * 0.028f
+            tp.color = 0x88FFFFFF.toInt()
+            canvas.drawText(dateText, cx, cy + h * 0.04f, tp)
+            postInvalidateDelayed(1000L)
+            return
+        }
         canvas.drawColor(0xB0000000.toInt())
         orb(canvas, 0, w * (0.28f + 0.18f * sinf(t * 0.11f)), h * (0.35f + 0.18f * cosf(t * 0.08f)))
         orb(canvas, 1, w * (0.72f + 0.16f * cosf(t * 0.09f)), h * (0.68f + 0.16f * sinf(t * 0.12f)))
@@ -515,8 +766,10 @@ class AppCarousel(c: Context) : View(c) {
         setOnKeyListener { _, keyCode, event -> handleKey(keyCode, event) }
     }
 
-    fun updateApps(list: List<App>) {
-        val keep = if (apps.isNotEmpty() && target in apps.indices) apps[target].pkg else null
+    fun selectedPkg(): String? = if (apps.isNotEmpty() && target in apps.indices) apps[target].pkg else null
+
+    fun updateApps(list: List<App>, startPkg: String? = null) {
+        val keep = selectedPkg() ?: startPkg
         apps = list
         var t = 0
         if (keep != null) {
@@ -698,7 +951,6 @@ class AppCarousel(c: Context) : View(c) {
 
 class MainActivity : Activity() {
     private val vlc = "org.videolan.vlc"
-    private val idleMs = 10L * 60L * 1000L
     private lateinit var root: FrameLayout
     private lateinit var colView: LinearLayout
     private lateinit var clock: GlassClock
@@ -711,6 +963,8 @@ class MainActivity : Activity() {
     private lateinit var wpPill: GlassBox
     private lateinit var optPill: GlassBox
     private lateinit var ambientView: AmbientView
+    private lateinit var forest: ForestView
+    private var resumed = false
     private val handler = Handler(Looper.getMainLooper())
     private var ready = false
     private val prefs: SharedPreferences by lazy { getSharedPreferences("glass", Context.MODE_PRIVATE) }
@@ -730,6 +984,7 @@ class MainActivity : Activity() {
     private val tick = object : Runnable {
         override fun run() {
             updateTime()
+            syncForestSound()
             handler.postDelayed(this, 15000)
         }
     }
@@ -800,6 +1055,8 @@ class MainActivity : Activity() {
 
         root = FrameLayout(this)
         root.addView(WallView(this), FrameLayout.LayoutParams(-1, -1))
+        forest = ForestView(this)
+        root.addView(forest, FrameLayout.LayoutParams(-1, -1))
 
         val col = LinearLayout(this)
         colView = col
@@ -889,7 +1146,10 @@ class MainActivity : Activity() {
         carousel = AppCarousel(this)
         carousel.onLaunch = { a -> launch(a.pkg) }
         carousel.onStep = { playGlide() }
-        carousel.onLock = { playLock() }
+        carousel.onLock = {
+            playLock()
+            carousel.selectedPkg()?.let { prefs.edit().putString("last_app", it).apply() }
+        }
         val carH = (resources.displayMetrics.heightPixels * 0.33f).toInt()
         col.addView(carousel, LinearLayout.LayoutParams(-1, carH))
 
@@ -904,6 +1164,13 @@ class MainActivity : Activity() {
         applyWallpaper(wpIdx, false)
         initSounds()
         ready = true
+        if (prefs.getBoolean("startup_anim", true)) {
+            colView.alpha = 0f
+            colView.translationY = dp(14).toFloat()
+            colView.animate().alpha(1f).translationY(0f).setStartDelay(200).setDuration(1100).start()
+            forest.alpha = 0f
+            forest.animate().alpha(1f).setStartDelay(500).setDuration(1400).start()
+        }
     }
 
     override fun onResume() {
@@ -917,10 +1184,14 @@ class MainActivity : Activity() {
         handler.post(progTick)
         handler.postDelayed(msgTick, 600)
         resetIdle()
+        resumed = true
+        applyForest()
     }
 
     override fun onPause() {
         super.onPause()
+        resumed = false
+        if (ready) applyForest()
         handler.removeCallbacks(tick)
         handler.removeCallbacks(progTick)
         handler.removeCallbacks(msgTick)
@@ -933,6 +1204,7 @@ class MainActivity : Activity() {
         mp = null
         try { sp?.release() } catch (e: Throwable) {}
         sp = null
+        stopForestSound()
     }
 
     override fun onUserInteraction() {
@@ -965,15 +1237,88 @@ class MainActivity : Activity() {
     private var pausedByAmbient = 0
     private val idleRun = Runnable { enterAmbient() }
 
+    private fun idleDelay(): Long = prefs.getInt("idle_min", 10) * 60_000L
+
+    private fun applyForest() {
+        if (!ready) return
+        forest.enabled = prefs.getBoolean("forest_on", true)
+        forest.birdsOn = prefs.getBoolean("forest_birds", true)
+        forest.fxOn = prefs.getBoolean("forest_fx", true)
+        forest.activity = prefs.getInt("forest_act", 1).coerceIn(0, 2)
+        forest.intensity = prefs.getInt("forest_int", 1).coerceIn(0, 2)
+        var calm = 1f
+        var run = resumed
+        if (ambient) {
+            val mode = prefs.getInt("amb_mode", 0)
+            val af = prefs.getInt("amb_forest", 1)
+            if (mode == 0 || mode == 3 || af == 0) run = false
+            if (af == 1) calm = 0.5f
+        }
+        forest.calm = calm
+        forest.setRunning(run)
+        syncForestSound()
+    }
+
+    // ---- forest sounds: a quiet looping ambience, separate from music, only while the launcher is visible ----
+    private var fsp: MediaPlayer? = null
+    private var fspSel = 0
+
+    private fun stopForestSound() {
+        try { fsp?.release() } catch (x: Throwable) {}
+        fsp = null
+        fspSel = 0
+    }
+
+    private fun syncForestSound() {
+        if (!ready) return
+        val sel = prefs.getInt("forest_snd", 0)
+        var want = sel in 1..3 && prefs.getBoolean("forest_on", true) && resumed
+        if (want && ambient) {
+            val m = prefs.getInt("amb_mode", 0)
+            if (m == 0 || m == 3 || prefs.getInt("amb_forest", 1) == 0) want = false
+        }
+        if (want) {
+            if (playing) want = false
+            val e = ext
+            if (e != null && e.playbackState?.state == PlaybackState.STATE_PLAYING) want = false
+        }
+        if (!want) {
+            stopForestSound()
+            return
+        }
+        val v = floatArrayOf(0.12f, 0.25f, 0.45f)[prefs.getInt("forest_vol", 1).coerceIn(0, 2)]
+        val cur = fsp
+        if (cur == null || fspSel != sel) {
+            stopForestSound()
+            val res = intArrayOf(0, R.raw.forest_birds, R.raw.forest_woodland, R.raw.forest_dark)[sel]
+            val m = try { MediaPlayer.create(this, res) } catch (x: Throwable) { null }
+            if (m == null) return
+            m.isLooping = true
+            m.setVolume(v, v)
+            try { m.start() } catch (x: Throwable) {}
+            fsp = m
+            fspSel = sel
+        } else {
+            try {
+                cur.setVolume(v, v)
+                if (!cur.isPlaying) cur.start()
+            } catch (x: Throwable) {}
+        }
+    }
+
     private fun resetIdle() {
         handler.removeCallbacks(idleRun)
-        if (ready) handler.postDelayed(idleRun, idleMs)
+        val d = idleDelay()
+        if (ready && d > 0L) handler.postDelayed(idleRun, d)
     }
 
     private fun enterAmbient() {
         if (ambient || !ready) return
         hideOverlay()
         ambient = true
+        ambientView.mode = prefs.getInt("amb_mode", 0)
+        ambientView.invalidate()
+        applyForest()
         prevFocus = currentFocus
         updateTime()
         ambientView.visibility = View.VISIBLE
@@ -998,6 +1343,7 @@ class MainActivity : Activity() {
     private fun exitAmbient() {
         if (!ambient) return
         ambient = false
+        applyForest()
         ambientView.animate().alpha(0f).setDuration(600).withEndAction {
             if (!ambient) ambientView.visibility = View.GONE
         }.start()
@@ -1359,21 +1705,8 @@ class MainActivity : Activity() {
             prefs.edit().putInt("sfx_vol", nx).apply()
             playGlide()
         })
-        rows.add(optRow("Pause music when ambient mode starts", { if (prefs.getBoolean("amb_pause", false)) "Pause" else "Keep playing" }) {
-            prefs.edit().putBoolean("amb_pause", !prefs.getBoolean("amb_pause", false)).apply()
-        })
-        rows.add(optRow("Show song and artwork on ambient screen", { if (prefs.getBoolean("amb_song", true)) "On" else "Off" }) {
-            prefs.edit().putBoolean("amb_song", !prefs.getBoolean("amb_song", true)).apply()
-        })
-        rows.add(optRow("Shuffle songs", { if (shuffle) "On" else "Off" }) {
-            shuffle = !shuffle
-            prefs.edit().putBoolean("shuffle", shuffle).apply()
-            updateShuffleUi()
-        })
-        rows.add(optRow("Start ambient mode now", { "Start" }) {
-            hideOverlay()
-            handler.postDelayed({ enterAmbient() }, 250)
-        })
+        rows.add(optRow("Living Forest settings", { "Open" }) { openForestPanel() })
+        rows.add(optRow("Ambient mode and inactivity", { "Open" }) { openAmbientPanel() })
         rows.add(optRow("Reminders and appointments", { loadAppts().size.toString() }) {
             showReminders()
         })
@@ -1384,13 +1717,76 @@ class MainActivity : Activity() {
                 Toast.makeText(this, "This TV has no notification access screen.", Toast.LENGTH_LONG).show()
             }
         })
+        rows.add(optRow("Startup animation", { onOff("startup_anim", true) }) { toggle("startup_anim", true) })
         rows.add(optRow("Close", { "" }) { hideOverlay() })
         for (r in rows) {
-            val lp = LinearLayout.LayoutParams(-1, dp(50))
-            lp.setMargins(0, dp(4), 0, dp(4))
+            val lp = LinearLayout.LayoutParams(-1, dp(44))
+            lp.setMargins(0, dp(3), 0, dp(3))
             col.addView(r, lp)
         }
         showOverlay(overlayShell("Glass Home options", col, 0.62f), optPill)
+    }
+
+    private fun onOff(k: String, def: Boolean): String = if (prefs.getBoolean(k, def)) "On" else "Off"
+
+    private fun toggle(k: String, def: Boolean) {
+        prefs.edit().putBoolean(k, !prefs.getBoolean(k, def)).apply()
+    }
+
+    private fun cyc(k: String, def: Int, n: Int) {
+        prefs.edit().putInt(k, (prefs.getInt(k, def) + 1) % n).apply()
+    }
+
+    private fun panelList(title: String, rows: List<GlassBox>) {
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.clipChildren = false
+        for (r in rows) {
+            val lp = LinearLayout.LayoutParams(-1, dp(44))
+            lp.setMargins(0, dp(3), 0, dp(3))
+            col.addView(r, lp)
+        }
+        showOverlay(overlayShell(title, col, 0.62f), optPill)
+    }
+
+    private fun openForestPanel() {
+        val acts = arrayOf("Low", "Natural", "Lively")
+        val ints = arrayOf("Low", "Medium", "High")
+        val rows = ArrayList<GlassBox>()
+        rows.add(optRow("Living Forest", { onOff("forest_on", true) }) { toggle("forest_on", true); applyForest() })
+        rows.add(optRow("Bird animations", { onOff("forest_birds", true) }) { toggle("forest_birds", true); applyForest() })
+        rows.add(optRow("Forest ambient effects", { onOff("forest_fx", true) }) { toggle("forest_fx", true); applyForest() })
+        rows.add(optRow("Bird activity", { acts[prefs.getInt("forest_act", 1).coerceIn(0, 2)] }) { cyc("forest_act", 1, 3); applyForest() })
+        rows.add(optRow("Ambient animation intensity", { ints[prefs.getInt("forest_int", 1).coerceIn(0, 2)] }) { cyc("forest_int", 1, 3); applyForest() })
+        val snds = arrayOf("Off", "Morning birdsong", "Woodland", "Dark forest")
+        val vols = arrayOf("Low", "Medium", "High")
+        rows.add(optRow("Forest sounds", { snds[prefs.getInt("forest_snd", 0).coerceIn(0, 3)] }) { cyc("forest_snd", 0, 4); syncForestSound() })
+        rows.add(optRow("Forest sound volume", { vols[prefs.getInt("forest_vol", 1).coerceIn(0, 2)] }) { cyc("forest_vol", 1, 3); syncForestSound() })
+        rows.add(optRow("Close", { "" }) { hideOverlay() })
+        panelList("Living Forest", rows)
+    }
+
+    private fun openAmbientPanel() {
+        val modes = arrayOf("Classic", "Pure ambient", "Ambient clock", "Static wallpaper")
+        val afs = arrayOf("Off", "Reduced", "Full")
+        val mins = intArrayOf(0, 2, 5, 10, 15, 30)
+        val rows = ArrayList<GlassBox>()
+        rows.add(optRow("Ambient mode", { modes[prefs.getInt("amb_mode", 0).coerceIn(0, 3)] }) { cyc("amb_mode", 0, 4) })
+        rows.add(optRow("Inactivity timeout", { val m = prefs.getInt("idle_min", 10); if (m == 0) "Off" else "$m min" }) {
+            val cur = prefs.getInt("idle_min", 10)
+            val i = mins.indexOf(cur)
+            prefs.edit().putInt("idle_min", mins[(i + 1) % mins.size]).apply()
+            resetIdle()
+        })
+        rows.add(optRow("Forest during ambient", { afs[prefs.getInt("amb_forest", 1).coerceIn(0, 2)] }) { cyc("amb_forest", 1, 3) })
+        rows.add(optRow("Pause music when ambient starts", { if (prefs.getBoolean("amb_pause", false)) "Pause" else "Keep playing" }) { toggle("amb_pause", false) })
+        rows.add(optRow("Show song and artwork (Classic)", { onOff("amb_song", true) }) { toggle("amb_song", true) })
+        rows.add(optRow("Start ambient mode now", { "Start" }) {
+            hideOverlay()
+            handler.postDelayed({ enterAmbient() }, 250)
+        })
+        rows.add(optRow("Close", { "" }) { hideOverlay() })
+        panelList("Ambient mode", rows)
     }
 
     // ================= reminders =================
@@ -1699,7 +2095,7 @@ class MainActivity : Activity() {
 
     // ================= apps =================
     private fun build() {
-        carousel.updateApps(loadApps())
+        carousel.updateApps(loadApps(), prefs.getString("last_app", null))
         updateTime()
         if (currentFocus == null) carousel.requestFocus()
     }
@@ -2199,6 +2595,7 @@ class MainActivity : Activity() {
     }
 
     private fun refreshMusic() {
+        if (ready) syncForestSound()
         if (!ready) return
         val title: String
         val artist: String
