@@ -515,7 +515,7 @@ class AppCarousel(c: Context) : View(c) {
         setOnKeyListener { _, keyCode, event -> handleKey(keyCode, event) }
     }
 
-    fun setApps(list: List<App>) {
+    fun updateApps(list: List<App>) {
         val keep = if (apps.isNotEmpty() && target in apps.indices) apps[target].pkg else null
         apps = list
         var t = 0
@@ -1699,7 +1699,7 @@ class MainActivity : Activity() {
 
     // ================= apps =================
     private fun build() {
-        carousel.setApps(loadApps())
+        carousel.updateApps(loadApps())
         updateTime()
         if (currentFocus == null) carousel.requestFocus()
     }
